@@ -24,7 +24,7 @@
  *   lode search <query> [--path=.]    match keywords, tags, type, summary, filename
  *   lode list [--type=T] [--tag=T] [--path=.]
  *   lode walk <file>                  resolve internal links, show linked summaries
- *   lode map [--path=.]               generate index from frontmatter
+ *   lode map [--path=.]               print index from frontmatter
  *   lode terms [--path=.]             aggregate term blocks into glossary
  *   lode tags [--path=.]              tag counts
  *   lode check [--path=.]             lint frontmatter, links, terms, line count, orphans
@@ -600,7 +600,7 @@ The \`lode\` tool is available for searching and navigating this lode:
   lode search <query>       find files by keywords, tags, summary, or filename
   lode list [--type=T] [--tag=T]   list files, optionally filtered
   lode walk <file-or-dir>   follow internal links, show linked summaries
-  lode map                  generate directory index from frontmatter
+  lode map                  print directory index from frontmatter
   lode terms                aggregate term blocks across the lode
   lode tags                 show tag frequency counts
   lode check                lint frontmatter, links, terms, line count, orphans
@@ -1350,7 +1350,7 @@ Commands:
   search <query>       match keywords, tags, type, summary, filename
   list [--type=T] [--tag=T]   list files, optionally filtered
   walk <file-or-dir>   resolve internal links, show linked summaries
-  map                  generate index from frontmatter
+  map                  print index from frontmatter
   terms                aggregate term blocks into glossary
   tags                 tag counts
   check                lint frontmatter, links, terms, line count, orphans

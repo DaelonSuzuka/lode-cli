@@ -16,7 +16,7 @@ commands separately mutate mailbox and registry state under `~/.lode/`.
   sublodes.
 - `lode walk <file-or-dir>` — follow internal links and show linked summaries.
 - `lode terms` — aggregate inline term blocks across the owned Lode.
-- `lode map` — generate the directory index from frontmatter.
+- `lode map` — print a directory index from frontmatter; it does not write `lode-map.md`.
 - `lode check` — lint frontmatter, ownership and source relationships, links,
   term conflicts, plan status, and orphans. Run it after editing Lode files.
 - `lode plans [--status=S]` — list plans in lifecycle order or select one
@@ -124,20 +124,26 @@ status: idea
 
 The lifecycle is `idea` → `accepted` → `active` → `done` / `parked`.
 
-- `idea` — unvetted backlog item.
+- `idea` — materialized unvetted intention.
 - `accepted` — committed work not currently active.
 - `active` — currently being worked.
-- `done` — conclusions merged into the domain files that own the knowledge.
-- `parked` — deferred but retained.
+- `done` — implementation complete; durable absorption and deletion pending.
+- `parked` — deferred but retained because re-entry value remains.
 
 `lode plans` lists every plan in lifecycle order.
 `lode plans --status=active` is the roadmap;
-`lode plans --status=idea` is the backlog. `lode check` reports missing or
+`lode plans --status=idea` is the backlog; and
+`lode plans --status=done` is the closure queue. `lode check` reports missing or
 unknown plan status.
 
-Roadmap and todo files collapse into `plans/`. A plan is the intent and
-coordination mechanism, not a disposable task: it completes when its conclusions
-are absorbed by the Lode files that own them.
+Every change moves through understanding, expectation, implementation, and
+evidence, but only materialize a plan when doing so lowers coordination,
+interruption, or re-entry cost. A plan is a transient working packet, not a
+routine implementation prerequisite or project history. When implementation is
+coherent, absorb its lasting rationale, decisions, relationships, and
+expectations into their owning Lode or product artifacts, inspect the plan for
+unique information, and delete it. Roadmap and todo files are legacy migration
+inputs rather than parallel authorities.
 
 ## Inter-project mail
 

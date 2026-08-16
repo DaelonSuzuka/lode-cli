@@ -106,7 +106,7 @@ lode startup              dump entrypoint files for session start
 lode search <query>       match keywords, tags, type, summary, filename
 lode list [--type=T] [--tag=T]   list files, optionally filtered
 lode walk <file-or-dir>   resolve internal links, show linked summaries
-lode map                  generate index from frontmatter
+lode map                  print directory index from frontmatter
 lode terms                aggregate term blocks into glossary
 lode tags                 tag counts
 lode check                lint frontmatter, links, terms, line count, orphans
@@ -228,6 +228,7 @@ The lifecycle is `idea` → `accepted` → `active` → `done` / `parked`.
 lode plans
 lode plans --status=active
 lode plans --status=idea
+lode plans --status=done
 ```
 
 The unfiltered command merges root and declared-sublode plans and sorts them by
@@ -235,10 +236,20 @@ lifecycle state, then path. Missing or unknown status remains visible in the
 unfiltered output and is reported by `lode check`; filters accept only the five
 recognized states.
 
-Roadmap and todo files collapse into `plans/`: active plans form the roadmap and
-idea plans form the backlog. A plan is an intent and coordination record, not a
-disposable task. It completes when its conclusions are absorbed into the Lode
-domain files that own that knowledge.
+Every change still moves through understanding, expectation, implementation,
+and evidence, but not every loop warrants a plan file. Materialize a plan only
+when it reduces coordination, interruption, or re-entry cost. A plan is a
+transient working packet carrying the current expectations, decisions, evidence
+boundary, and unresolved questions—not a routine implementation prerequisite or
+project history.
+
+`idea` plans form the backlog and `active` plans form the roadmap. `done` means
+implementation is complete but durable absorption and deletion remain; use
+`lode plans --status=done` as the closure queue. Once lasting rationale,
+decisions, relationships, and expectations have reached their owning Lode or
+product artifacts, inspect the plan for unique information and delete it.
+Roadmap and todo files are legacy migration inputs rather than parallel
+authorities.
 
 ## Repository contents
 
