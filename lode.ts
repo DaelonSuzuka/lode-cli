@@ -342,6 +342,13 @@ const STARTUP_FILES = ["summary.md", "terminology.md", "lode-map.md", "tmp/activ
 const BUDGET = 40000;
 
 function cmdStartup(root: string, _args: string[]): void {
+	// Verify this is a real lode, not a cwd fallback. If no lode exists,
+	// exit silently with zero — the hook calls this unconditionally.
+	const hasLode = fs.existsSync(path.join(root, "summary.md"))
+		|| fs.existsSync(path.join(root, "lode-map.md"))
+		|| fs.existsSync(path.join(root, "terminology.md"));
+	if (!hasLode) return;
+
 	const sections: string[] = [];
 	let used = 0;
 	const omitted: string[] = [];
