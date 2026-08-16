@@ -390,7 +390,25 @@ function cmdStartup(root: string, _args: string[]): void {
 		console.log(`\n=== over the ${BUDGET}-char budget, NOT loaded — read these ===`);
 		console.log(omitted.map(o => `- ${o}`).join("\n"));
 	}
+	console.log("\n" + TOOL_HELP);
 }
+
+const TOOL_HELP = `=== lode-cli ===
+The \`lode\` tool is available for searching and navigating this lode:
+
+  lode search <query>       find files by keywords, tags, summary, or filename
+  lode list [--type=T] [--tag=T]   list files, optionally filtered
+  lode walk <file-or-dir>   follow internal links, show linked summaries
+  lode map                  generate directory index from frontmatter
+  lode terms                aggregate term blocks across the lode
+  lode tags                 show tag frequency counts
+  lode check                lint frontmatter, links, terms, line count, orphans
+  lode mail send <project> <subject>   send inter-project mail (body on stdin)
+  lode mail read                        show and mark unread mail for current project
+  lode mail unread                      print count of unread mail
+
+Use these instead of manually grepping the lode directory. The files are still
+plain markdown — read and edit them directly when you know which file you need.`;
 
 function cmdSearch(root: string, args: string[]): void {
 	const query = args.join(" ").toLowerCase();
