@@ -66,6 +66,19 @@ Sublode paths are relative to the project root, which is the parent of the
 selected root lode. The list is complete rather than recursive: unlisted lodes
 are outside the project's ownership scope.
 
+Any Lode file may declare the exact project source files it documents:
+
+```yaml
+---
+sources:
+  - src/os/shell.c
+  - src/os/shell.h
+---
+```
+
+Source paths are also relative to the project root. They need not currently
+exist, so a staged deletion can still notify the Lode file that documented it.
+
 The frontmatter parser supports flat scalar fields plus inline and block lists.
 It does not implement nested mappings, multiline strings, anchors, or
 references.
@@ -94,6 +107,8 @@ lode map                  generate index from frontmatter
 lode terms                aggregate term blocks into glossary
 lode tags                 tag counts
 lode check                lint frontmatter, links, terms, line count, orphans
+lode precommit            report staged sources linked from lode files
+lode recent [N]           show patches for recent lode-touching commits
 lode mail send <project> <subject>   send inter-project mail (body on stdin)
 lode mail read                        show and mark unread mail
 lode mail list                        all mail for current project
@@ -120,6 +135,35 @@ root entrypoint files plus every declared sublode's `summary.md`.
 refer back to the root lode, overlap or duplicate another declaration, do not
 name a directory, or lack `summary.md`. Invalid declarations are skipped by all
 commands.
+
+## Precommit source relationships
+
+`lode precommit` reads every staged Git change and compares both sides of
+renames with the optional `sources` lists on root and declared-sublode files:
+
+```text
+[INFO] lode/architecture/shell.md: staged source changed → src/os/shell.c
+```
+
+Matches are informational and exit successfully. The command errors only when
+the selected Lode is outside Git or Git cannot read the index. Absolute,
+project-escaping, and duplicate source declarations are reported by
+`lode check`; invalid declarations are skipped by `precommit`.
+
+## Recent committed changes
+
+`lode recent [N]` shows commit metadata and unified patches for the newest `N`
+commits that touched the root or a declared sublode. `N` defaults to 5 and
+counts Lode-touching commits, not repository commits. Patches exclude unrelated
+source changes from mixed commits.
+
+The command reads committed history only; staged impact belongs to
+`lode precommit`. It asks Git for the repository containing the selected root,
+so it works both when `lode/` is part of a project repository and when the Lode
+directory is itself a repository.
+
+Both Git commands warn and skip declared lodes outside the selected root's
+repository; they do not merge histories or indexes across repositories.
 
 ## Mail
 
@@ -152,7 +196,7 @@ The tool finds the lode root in this order:
 
 ## What `lode check` catches
 
-- Missing frontmatter (no type, tags, keywords, or summary)
+- Missing recognized frontmatter
 - Missing `type` (must be `domain` or `external`)
 - Missing `summary` or `keywords`
 - Broken internal links (relative path points at nothing)
@@ -160,6 +204,7 @@ The tool finds the lode root in this order:
 - Files over 250 lines
 - Orphan files (no incoming links, not an entrypoint file)
 - Invalid or unsafe sublode ownership declarations
+- Invalid, escaping, or duplicate `sources` declarations
 
 ## Plans with lifecycle
 

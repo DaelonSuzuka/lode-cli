@@ -12,6 +12,7 @@
  *   keywords:  word1, word2, word3
  *   summary:   one-line description for the map
  *   sublodes:  project-relative lode directory paths owned by this root
+ *   sources:   project-relative source files documented by this lode file
  *
  * Term blocks in the body:
  *   ## Terms
@@ -26,12 +27,15 @@
  *   lode terms [--path=.]             aggregate term blocks into glossary
  *   lode tags [--path=.]              tag counts
  *   lode check [--path=.]             lint frontmatter, links, terms, line count, orphans
+ *   lode precommit [--path=.]         report staged sources linked from lode files
+ *   lode recent [N] [--path=.]        show recent committed lode patches
  */
 
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import * as crypto from "node:crypto";
+import { spawnSync } from "node:child_process";
 
 // ─── types ──────────────────────────────────────────────────────────────
 
@@ -41,6 +45,7 @@ interface Frontmatter {
 	keywords?: string[];
 	summary?: string;
 	sublodes?: string[];
+	sources?: string[];
 	_raw?: Record<string, unknown>;
 }
 
@@ -122,6 +127,8 @@ function parseFrontmatter(content: string): { fm: Frontmatter; body: string } {
 			fm.keywords = Array.isArray(value) ? value : parseList(value);
 		} else if (key === "sublodes") {
 			fm.sublodes = Array.isArray(value) ? value : parseList(value);
+		} else if (key === "sources") {
+			fm.sources = Array.isArray(value) ? value : parseList(value);
 		}
 		(fm._raw as Record<string, unknown>)[key] = value;
 	}
@@ -433,6 +440,91 @@ function parseFilterArgs(args: string[]): { type?: string; tag?: string; rest: s
 	return result;
 }
 
+interface GitCommandResult {
+	status: number;
+	stdout: string;
+	stderr: string;
+}
+
+function runGit(cwd: string, args: string[]): GitCommandResult {
+	const result = spawnSync("git", args, {
+		cwd,
+		encoding: "utf8",
+		maxBuffer: 64 * 1024 * 1024,
+	});
+	return {
+		status: result.status ?? 1,
+		stdout: result.stdout ?? "",
+		stderr: result.stderr || result.error?.message || "",
+	};
+}
+
+function findGitRoot(start: string): string | null {
+	const result = runGit(start, ["rev-parse", "--show-toplevel"]);
+	if (result.status !== 0 || !result.stdout.trim()) return null;
+	try {
+		return fs.realpathSync(result.stdout.trim());
+	} catch {
+		return path.resolve(result.stdout.trim());
+	}
+}
+
+function canonicalProjectRoot(lodeRoot: string): string {
+	try {
+		return path.dirname(fs.realpathSync(lodeRoot));
+	} catch {
+		return path.resolve(path.dirname(lodeRoot));
+	}
+}
+
+function toGitPath(value: string): string {
+	return value.split(path.sep).join("/");
+}
+
+function gitPathKey(value: string): string {
+	const normalized = toGitPath(value);
+	return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+function resolveProjectRelativePath(projectRoot: string, declared: string): { abs?: string; issue?: string } {
+	if (path.isAbsolute(declared)) return { issue: "absolute paths are not allowed" };
+	const abs = path.resolve(projectRoot, declared);
+	if (!isInsidePath(projectRoot, abs)) return { issue: "path escapes the project root" };
+	return { abs };
+}
+
+function ownedLodePathspecs(root: string, gitRoot: string): { paths: string[]; skipped: string[] } {
+	const projectRoot = path.dirname(root);
+	const ownedRoots = [
+		path.resolve(root),
+		...readSublodeConfig(root).paths.map(sub => path.resolve(projectRoot, sub)),
+	];
+	const paths = new Set<string>();
+	const skipped: string[] = [];
+
+	for (const ownedRoot of ownedRoots) {
+		let realRoot: string;
+		try {
+			realRoot = fs.realpathSync(ownedRoot);
+		} catch {
+			skipped.push(ownedRoot);
+			continue;
+		}
+		if (!isInsidePath(gitRoot, realRoot)) {
+			skipped.push(ownedRoot);
+			continue;
+		}
+		const rel = path.relative(gitRoot, realRoot);
+		if (!rel) {
+			paths.add(".");
+			continue;
+		}
+		paths.add(toGitPath(rel));
+	}
+
+	return { paths: paths.has(".") ? ["."] : [...paths].sort(), skipped };
+}
+
 // ─── commands ───────────────────────────────────────────────────────────
 
 const STARTUP_FILES = ["summary.md", "terminology.md", "lode-map.md", "tmp/active.md"];
@@ -507,6 +599,8 @@ The \`lode\` tool is available for searching and navigating this lode:
   lode terms                aggregate term blocks across the lode
   lode tags                 show tag frequency counts
   lode check                lint frontmatter, links, terms, line count, orphans
+  lode precommit            report staged source changes linked from lode files
+  lode recent [N]           show patches for recent lode-touching commits
   lode mail send <project> <subject>   send inter-project mail (body on stdin)
   lode mail read                        show and mark unread mail for current project
   lode mail unread                      print count of unread mail
@@ -678,6 +772,136 @@ function cmdTags(root: string, _args: string[]): void {
 	if (sorted.length === 0) console.log("No tags found.");
 }
 
+function cmdPrecommit(root: string, args: string[]): void {
+	if (args.length > 0) {
+		console.error("Usage: lode precommit");
+		process.exit(2);
+	}
+
+	const gitRoot = findGitRoot(root);
+	if (!gitRoot) {
+		console.error("Cannot run precommit: the selected lode is not inside a Git repository.");
+		process.exit(1);
+	}
+
+	const stagedResult = runGit(gitRoot, [
+		"diff",
+		"--cached",
+		"--name-only",
+		"--no-renames",
+		"-z",
+		"--",
+	]);
+	if (stagedResult.status !== 0) {
+		console.error(`Cannot read staged files: ${stagedResult.stderr.trim() || "git diff failed"}`);
+		process.exit(1);
+	}
+
+	const staged = new Map<string, string>();
+	for (const file of stagedResult.stdout.split("\0").filter(Boolean)) {
+		staged.set(gitPathKey(file), file);
+	}
+	if (staged.size === 0) {
+		console.log("No staged files.");
+		return;
+	}
+
+	const projectRoot = canonicalProjectRoot(root);
+	const owned = ownedLodePathspecs(root, gitRoot);
+	for (const skipped of owned.skipped) {
+		console.error(`[WARN] owned lode is outside this Git repository and was skipped: ${skipped}`);
+	}
+	const affected: Array<{ file: string; sources: string[] }> = [];
+	for (const file of loadAll(root)) {
+		let realFile: string;
+		try {
+			realFile = fs.realpathSync(file.absPath);
+		} catch {
+			continue;
+		}
+		if (!isInsidePath(gitRoot, realFile)) continue;
+		const matches = new Set<string>();
+		for (const declared of file.frontmatter.sources ?? []) {
+			const resolved = resolveProjectRelativePath(projectRoot, declared);
+			if (!resolved.abs) {
+				console.error(`[WARN] ${file.relPath}: invalid source '${declared}': ${resolved.issue}`);
+				continue;
+			}
+			if (!isInsidePath(gitRoot, resolved.abs)) {
+				console.error(`[WARN] ${file.relPath}: source '${declared}' is outside the Git repository`);
+				continue;
+			}
+			const gitPath = gitPathKey(path.relative(gitRoot, resolved.abs));
+			const stagedPath = staged.get(gitPath);
+			if (stagedPath) matches.add(stagedPath);
+		}
+		if (matches.size > 0) {
+			affected.push({ file: file.relPath, sources: [...matches].sort() });
+		}
+	}
+
+	if (affected.length === 0) {
+		console.log("No source-linked lode files affected.");
+		return;
+	}
+	for (const match of affected.sort((a, b) => a.file.localeCompare(b.file))) {
+		console.log(`[INFO] ${match.file}: staged source changed → ${match.sources.join(", ")}`);
+	}
+}
+
+function cmdRecent(root: string, args: string[]): void {
+	const countArg = args[0] ?? "5";
+	if (args.length > 1 || !/^[1-9]\d*$/.test(countArg)) {
+		console.error("Usage: lode recent [positive-commit-count]");
+		process.exit(2);
+	}
+
+	const gitRoot = findGitRoot(root);
+	if (!gitRoot) {
+		console.error("Cannot show recent changes: the selected lode is not inside a Git repository.");
+		process.exit(1);
+	}
+	const owned = ownedLodePathspecs(root, gitRoot);
+	for (const skipped of owned.skipped) {
+		console.error(`[WARN] owned lode is outside this Git repository and was skipped: ${skipped}`);
+	}
+	if (owned.paths.length === 0) {
+		console.error("Cannot show recent changes: no owned lodes are tracked by this Git repository.");
+		process.exit(1);
+	}
+
+	const head = runGit(gitRoot, ["rev-parse", "--verify", "HEAD"]);
+	if (head.status !== 0) {
+		console.log("No committed lode changes.");
+		return;
+	}
+
+	const result = runGit(gitRoot, [
+		"--literal-pathspecs",
+		"log",
+		"-n",
+		countArg,
+		"--no-color",
+		"--no-ext-diff",
+		"--find-renames",
+		"--date=iso-strict",
+		"--format=commit %H%nAuthor: %an <%ae>%nDate:   %ad%n%n    %s%n",
+		"--patch",
+		"--",
+		...owned.paths,
+	]);
+	if (result.status !== 0) {
+		console.error(`Cannot read lode history: ${result.stderr.trim() || "git log failed"}`);
+		process.exit(1);
+	}
+	if (!result.stdout.trim()) {
+		console.log("No committed lode changes.");
+		return;
+	}
+	process.stdout.write(result.stdout);
+	if (!result.stdout.endsWith("\n")) process.stdout.write("\n");
+}
+
 function cmdCheck(root: string, _args: string[]): void {
 	const files = loadAll(root);
 	const allPaths = new Set(files.map(f => f.relPath));
@@ -687,6 +911,7 @@ function cmdCheck(root: string, _args: string[]): void {
 	for (const issue of readSublodeConfig(root).issues) {
 		issues.push({ file: rootSummary, issue, severity: "error" });
 	}
+	const projectRoot = canonicalProjectRoot(root);
 
 	// Build incoming link map for orphan detection
 	const incoming = new Map<string, Set<string>>();
@@ -702,7 +927,7 @@ function cmdCheck(root: string, _args: string[]): void {
 		const fm = file.frontmatter;
 
 		// Missing frontmatter
-		if (!fm.type && !fm.tags && !fm.keywords && !fm.summary && !fm.sublodes) {
+		if (!fm.type && !fm.tags && !fm.keywords && !fm.summary && !fm.sublodes && !fm.sources) {
 			issues.push({ file: rel, issue: "no frontmatter", severity: "warn" });
 		}
 		// Missing type
@@ -718,6 +943,25 @@ function cmdCheck(root: string, _args: string[]): void {
 		// Missing keywords
 		if (!fm.keywords || fm.keywords.length === 0) {
 			issues.push({ file: rel, issue: "missing keywords", severity: "warn" });
+		}
+		// Invalid or duplicate source relationships
+		const seenSources = new Set<string>();
+		for (const declared of fm.sources ?? []) {
+			const resolved = resolveProjectRelativePath(projectRoot, declared);
+			if (!resolved.abs) {
+				issues.push({
+					file: rel,
+					issue: `invalid source '${declared}': ${resolved.issue}`,
+					severity: "error",
+				});
+				continue;
+			}
+			const normalized = process.platform === "win32" ? resolved.abs.toLowerCase() : resolved.abs;
+			if (seenSources.has(normalized)) {
+				issues.push({ file: rel, issue: `duplicate source '${declared}'`, severity: "warn" });
+				continue;
+			}
+			seenSources.add(normalized);
 		}
 		// Over 250 lines
 		if (file.lines > 250) {
@@ -1024,6 +1268,8 @@ const COMMANDS: Record<string, (root: string, args: string[]) => void> = {
 	terms: cmdTerms,
 	tags: cmdTags,
 	check: cmdCheck,
+	precommit: cmdPrecommit,
+	recent: cmdRecent,
 	mail: cmdMail,
 };
 
@@ -1038,6 +1284,8 @@ Commands:
   terms                aggregate term blocks into glossary
   tags                 tag counts
   check                lint frontmatter, links, terms, line count, orphans
+  precommit            report staged sources linked from lode files
+  recent [N]           show patches for recent lode-touching commits
   mail send <project> <subject>   send mail (body on stdin)
   mail read                        show and mark unread mail
   mail list                        all mail for current project
