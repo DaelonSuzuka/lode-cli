@@ -7,10 +7,11 @@
  * a gate: read/edit/grep work directly on the files at all times.
  *
  * Frontmatter schema (all optional, but summary + keywords are recommended):
- *   type:     domain | external
- *   tags:     [tag1, tag2]
- *   keywords: word1, word2, word3
- *   summary:  one-line description for the map
+ *   type:      domain | external
+ *   tags:      [tag1, tag2]
+ *   keywords:  word1, word2, word3
+ *   summary:   one-line description for the map
+ *   sublodes:  project-relative lode directory paths owned by this root
  *
  * Term blocks in the body:
  *   ## Terms
@@ -39,6 +40,7 @@ interface Frontmatter {
 	tags?: string[];
 	keywords?: string[];
 	summary?: string;
+	sublodes?: string[];
 	_raw?: Record<string, unknown>;
 }
 
@@ -60,19 +62,17 @@ interface TermEntry {
 
 // ─── frontmatter parsing ────────────────────────────────────────────────
 //
-// Hand-rolled subset of YAML. Handles flat key-value pairs only:
+// Hand-rolled subset of YAML. Handles flat scalar fields and inline or block
+// lists:
 //   key: value
 //   key: [a, b, c]
-//   key: word1, word2, word3
+//   key:
+//     - a
+//     - b
 //
-// Does NOT handle:
-//   - nested mappings (key: { inner: value })
-//   - block lists (key:\n  - item\n  - item)
-//   - multi-line strings, anchors, references
-//
-// The schema deliberately uses only flat fields, so this is sufficient.
-// If the schema grows to need nested values, replace this parser with a
-// real YAML library — do not extend this hand-rolled one.
+// Does NOT handle nested mappings, multi-line strings, anchors, or references.
+// Keep the parser aligned with the actual frontmatter schema; use a real YAML
+// parser if the schema later requires general YAML semantics.
 
 function parseFrontmatter(content: string): { fm: Frontmatter; body: string } {
 	const fm: Frontmatter = { _raw: {} };
@@ -81,31 +81,55 @@ function parseFrontmatter(content: string): { fm: Frontmatter; body: string } {
 	if (end === -1) return { fm, body: content };
 	const block = content.slice(3, end).trim();
 	const body = content.slice(end + 4).replace(/^\n/, "");
-	for (const line of block.split("\n")) {
-		const trimmed = line.trim();
+	const lines = block.split("\n");
+
+	for (let i = 0; i < lines.length; i++) {
+		const trimmed = lines[i].trim();
 		if (!trimmed || trimmed.startsWith("#")) continue;
 		const colonIdx = trimmed.indexOf(":");
 		if (colonIdx === -1) continue;
 		const key = trimmed.slice(0, colonIdx).trim();
-		const value = trimmed.slice(colonIdx + 1).trim();
+		const scalar = trimmed.slice(colonIdx + 1).trim();
+		let value: string | string[] = scalar;
 
-		if (key === "type") {
+		if (!scalar) {
+			const items: string[] = [];
+			let next = i + 1;
+			while (next < lines.length) {
+				const nextLine = lines[next].trim();
+				if (!nextLine || nextLine.startsWith("#")) {
+					next++;
+					continue;
+				}
+				const match = lines[next].match(/^\s+-\s+(.+?)\s*$/);
+				if (!match) break;
+				items.push(unquoteListItem(match[1]));
+				next++;
+			}
+			if (items.length > 0) {
+				value = items;
+				i = next - 1;
+			}
+		}
+
+		if (key === "type" && typeof value === "string") {
 			fm.type = value;
-		} else if (key === "summary") {
+		} else if (key === "summary" && typeof value === "string") {
 			fm.summary = value;
 		} else if (key === "tags") {
-			fm.tags = parseList(value);
+			fm.tags = Array.isArray(value) ? value : parseList(value);
 		} else if (key === "keywords") {
-			// keywords can be comma-separated or YAML list
-			if (value.startsWith("[")) {
-				fm.keywords = parseList(value);
-			} else {
-				fm.keywords = value.split(",").map(s => s.trim()).filter(Boolean);
-			}
+			fm.keywords = Array.isArray(value) ? value : parseList(value);
+		} else if (key === "sublodes") {
+			fm.sublodes = Array.isArray(value) ? value : parseList(value);
 		}
 		(fm._raw as Record<string, unknown>)[key] = value;
 	}
 	return { fm, body };
+}
+
+function unquoteListItem(value: string): string {
+	return value.trim().replace(/^["']|["']$/g, "");
 }
 
 function parseList(value: string): string[] {
@@ -113,12 +137,10 @@ function parseList(value: string): string[] {
 	if (v.startsWith("[")) {
 		return v.slice(1, v.endsWith("]") ? -1 : undefined)
 			.split(",")
-			.map(s => s.trim().replace(/^["']|["']$/g, ""))
+			.map(unquoteListItem)
 			.filter(Boolean);
 	}
-	// YAML block list: check next lines — but we're parsing single lines here,
-	// so handle inline only. Block lists would need multi-line parsing.
-	return v.split(",").map(s => s.trim().replace(/^["']|["']$/g, "")).filter(Boolean);
+	return v.split(",").map(unquoteListItem).filter(Boolean);
 }
 
 // ─── term block parsing ─────────────────────────────────────────────────
@@ -218,45 +240,120 @@ function* walkMd(dir: string, base = dir): Generator<string> {
 	}
 }
 
-// ─── sublode detection ──────────────────────────────────────────────────
+// ─── sublode ownership ──────────────────────────────────────────────────
+
+interface SublodeConfig {
+	paths: string[];
+	issues: string[];
+}
+
+function isInsidePath(parent: string, candidate: string): boolean {
+	const rel = path.relative(parent, candidate);
+	return rel === "" || (rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel));
+}
 
 /**
- * Find all lode/ directories nested within the project tree, relative to the
- * lode root. A sublode is a `lode/` directory that is NOT the root itself and
- * is NOT nested inside another sublode's tree.
- * Returns paths relative to the project root (parent of the lode root).
+ * Read the complete sublode ownership list from the root summary. Sublode
+ * paths are relative to the project root (the parent of the root lode).
+ * Invalid declarations are reported and excluded rather than widening scope.
  */
-function findSublodes(lodeRoot: string): string[] {
-	const projectRoot = path.dirname(lodeRoot);
-	const sublodes: string[] = [];
+function readSublodeConfig(lodeRoot: string): SublodeConfig {
+	const projectRoot = path.resolve(path.dirname(lodeRoot));
 	const lodeRootAbs = path.resolve(lodeRoot);
+	const paths: string[] = [];
+	const issues: string[] = [];
+	const accepted: Array<{ rel: string; full: string; real: string }> = [];
+	let declared: string[] = [];
+	let realProjectRoot: string;
+	let realLodeRoot: string;
 
-	function* walk(dir: string): Generator<string> {
-		let entries: fs.Dirent[];
+	try {
+		realProjectRoot = fs.realpathSync(projectRoot);
+		realLodeRoot = fs.realpathSync(lodeRootAbs);
+		const content = fs.readFileSync(path.join(lodeRoot, "summary.md"), "utf8");
+		declared = parseFrontmatter(content).fm.sublodes ?? [];
+	} catch {
+		return { paths, issues };
+	}
+
+	for (const raw of declared) {
+		if (path.isAbsolute(raw)) {
+			issues.push(`invalid sublode '${raw}': absolute paths are not allowed`);
+			continue;
+		}
+
+		const full = path.resolve(projectRoot, raw);
+		const rel = path.relative(projectRoot, full);
+		if (!isInsidePath(projectRoot, full)) {
+			issues.push(`invalid sublode '${raw}': path escapes the project root`);
+			continue;
+		}
+		if (full === lodeRootAbs) {
+			issues.push(`invalid sublode '${raw}': path refers to the root lode`);
+			continue;
+		}
+		if (isInsidePath(lodeRootAbs, full) || isInsidePath(full, lodeRootAbs)) {
+			issues.push(`invalid sublode '${raw}': path overlaps the root lode`);
+			continue;
+		}
+
+		let stat: fs.Stats;
 		try {
-			entries = fs.readdirSync(dir, { withFileTypes: true });
+			stat = fs.statSync(full);
 		} catch {
-			return;
+			issues.push(`invalid sublode '${raw}': directory does not exist`);
+			continue;
 		}
-		for (const entry of entries) {
-			if (!entry.isDirectory()) continue;
-			if (entry.name === ".git" || entry.name === "node_modules" || entry.name === "tmp") continue;
-			const full = path.join(dir, entry.name);
-			if (entry.name === "lode") {
-				if (path.resolve(full) !== lodeRootAbs) {
-					yield path.relative(projectRoot, full);
-				}
-				// don't recurse into a sublode — it's its own lode
-				continue;
-			}
-			yield* walk(full);
+		if (!stat.isDirectory()) {
+			issues.push(`invalid sublode '${raw}': path is not a directory`);
+			continue;
 		}
+
+		let realFull: string;
+		try {
+			realFull = fs.realpathSync(full);
+		} catch {
+			issues.push(`invalid sublode '${raw}': path cannot be resolved`);
+			continue;
+		}
+		if (!isInsidePath(realProjectRoot, realFull)) {
+			issues.push(`invalid sublode '${raw}': resolved path escapes the project root`);
+			continue;
+		}
+		if (realFull === realLodeRoot) {
+			issues.push(`invalid sublode '${raw}': path resolves to the root lode`);
+			continue;
+		}
+		if (isInsidePath(realLodeRoot, realFull) || isInsidePath(realFull, realLodeRoot)) {
+			issues.push(`invalid sublode '${raw}': resolved path overlaps the root lode`);
+			continue;
+		}
+		const duplicate = accepted.find(entry => entry.full === full || entry.real === realFull);
+		if (duplicate) {
+			issues.push(`duplicate sublode '${raw}': same directory as '${duplicate.rel}'`);
+			continue;
+		}
+		const overlap = accepted.find(entry =>
+			isInsidePath(entry.real, realFull) || isInsidePath(realFull, entry.real)
+		);
+		if (overlap) {
+			issues.push(`invalid sublode '${raw}': overlaps '${overlap.rel}'`);
+			continue;
+		}
+
+		const summaryPath = path.join(full, "summary.md");
+		try {
+			if (!fs.statSync(summaryPath).isFile()) throw new Error("not a file");
+		} catch {
+			issues.push(`invalid sublode '${raw}': summary.md is missing`);
+			continue;
+		}
+
+		accepted.push({ rel, full, real: realFull });
+		paths.push(rel);
 	}
 
-	for (const sub of walk(projectRoot)) {
-		sublodes.push(sub);
-	}
-	return sublodes.sort();
+	return { paths: paths.sort(), issues };
 }
 
 function loadFile(relPath: string, root: string): LodeFile {
@@ -289,7 +386,7 @@ function loadAll(root: string): LodeFile[] {
 	}
 
 	// sublode files — merge by default, paths relative to project root
-	for (const sub of findSublodes(root)) {
+	for (const sub of readSublodeConfig(root).paths) {
 		const subRoot = path.join(projectRoot, sub);
 		for (const rel of walkMd(subRoot, projectRoot)) {
 			try {
@@ -368,7 +465,7 @@ function cmdStartup(root: string, _args: string[]): void {
 	}
 
 	// Sublode summaries — one paragraph each, within budget
-	const sublodes = findSublodes(root);
+	const sublodes = readSublodeConfig(root).paths;
 	const projectRoot = path.dirname(root);
 	const subSummaries: string[] = [];
 	for (const sub of sublodes) {
@@ -586,6 +683,11 @@ function cmdCheck(root: string, _args: string[]): void {
 	const allPaths = new Set(files.map(f => f.relPath));
 	const issues: Array<{ file: string; issue: string; severity: string }> = [];
 
+	const rootSummary = path.relative(path.dirname(root), path.join(root, "summary.md"));
+	for (const issue of readSublodeConfig(root).issues) {
+		issues.push({ file: rootSummary, issue, severity: "error" });
+	}
+
 	// Build incoming link map for orphan detection
 	const incoming = new Map<string, Set<string>>();
 	for (const file of files) {
@@ -600,7 +702,7 @@ function cmdCheck(root: string, _args: string[]): void {
 		const fm = file.frontmatter;
 
 		// Missing frontmatter
-		if (!fm.type && !fm.tags && !fm.keywords && !fm.summary) {
+		if (!fm.type && !fm.tags && !fm.keywords && !fm.summary && !fm.sublodes) {
 			issues.push({ file: rel, issue: "no frontmatter", severity: "warn" });
 		}
 		// Missing type

@@ -45,7 +45,9 @@ binary.
 
 ## Frontmatter schema
 
-All fields optional, but `summary` + `keywords` are recommended for every file.
+All fields are optional. `summary` and `keywords` are recommended for every
+file. The selected root's `summary.md` may also declare the complete set of
+sublodes that belong to the project:
 
 ```yaml
 ---
@@ -53,10 +55,20 @@ type: domain          # domain (about this project) | external (about someone el
 tags: [proxmox, storage]
 keywords: proxmox, cradle, storage, nas, omv, raid
 summary: Current OMV shares, accounts, plugins, and migration contracts
+sublodes:
+  - src/os/lode
+  - src/peripherals/lode
+  - toolchain/lode
 ---
 ```
 
-The frontmatter parser is a hand-rolled subset of YAML — flat key-value pairs only. No nested mappings, no block lists. If the schema grows to need nested values, replace the parser with a real YAML library.
+Sublode paths are relative to the project root, which is the parent of the
+selected root lode. The list is complete rather than recursive: unlisted lodes
+are outside the project's ownership scope.
+
+The frontmatter parser supports flat scalar fields plus inline and block lists.
+It does not implement nested mappings, multiline strings, anchors, or
+references.
 
 ## Term blocks
 
@@ -94,9 +106,20 @@ Overrides the lode root directory. If omitted, the tool auto-detects by walking 
 
 ## Sublodes
 
-A project can have nested lodes in subdirectories (e.g., `src/peripherals/lode/`, `toolchain/lode/`). The tool merges sublodes by default — `search`, `list`, `map`, `tags`, `terms`, and `check` all see the full project. File paths include the sublode prefix (e.g., `src/peripherals/lode/uart.md`).
+A project owns nested lodes by listing them in its root `summary.md` frontmatter.
+The tool does not infer ownership by recursively searching for directories named
+`lode`; the same directory shape can represent either a sublode or an unrelated
+project.
 
-`lode startup` includes root entrypoint files plus each sublode's `summary.md`.
+Declared sublodes are merged by default. `search`, `list`, `map`, `tags`,
+`terms`, and `check` see the full declared project. File paths include the
+sublode prefix, such as `src/peripherals/lode/uart.md`. `lode startup` includes
+root entrypoint files plus every declared sublode's `summary.md`.
+
+`lode check` reports declarations that are absolute, escape the project root,
+refer back to the root lode, overlap or duplicate another declaration, do not
+name a directory, or lack `summary.md`. Invalid declarations are skipped by all
+commands.
 
 ## Mail
 
@@ -136,6 +159,7 @@ The tool finds the lode root in this order:
 - Term conflicts (same term name, different definition)
 - Files over 250 lines
 - Orphan files (no incoming links, not an entrypoint file)
+- Invalid or unsafe sublode ownership declarations
 
 ## Plans with lifecycle
 
@@ -154,6 +178,7 @@ The roadmap and todos files collapse into `plans/` with status filtering. A comp
 ```
 lode-cli/
   lode.ts                       # the CLI tool (single file, zero dependencies)
+  lode.test.ts                  # focused CLI regression tests
   hooks/
     load-lode.ts                # omp startup hook (shells out to `lode startup`)
   fragments/
