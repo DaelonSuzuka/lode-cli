@@ -11,15 +11,28 @@ A lode is a directory of markdown files with optional YAML frontmatter. This too
 git clone https://github.com/DaelonSuzuka/lode-cli.git
 cd lode-cli
 
-# symlink to PATH (Linux/macOS)
-ln -sf "$(pwd)/lode.ts" ~/.local/bin/lode
+# install everything (CLI + omp hook)
+./install.sh
 
-# or build a standalone binary (no Bun runtime needed)
-bun build --compile lode.ts --outfile lode-bin
-cp lode-bin ~/.local/bin/lode
+# or install just the CLI
+./install.sh cli
+
+# or install just the omp startup hook
+./install.sh hook
+
+# verify what's installed
+./install.sh check
 ```
 
-Requires [Bun](https://bun.sh) to run the `.ts` file directly. The compiled binary is standalone.
+Requires [Bun](https://bun.sh) to run the `.ts` file directly. The compiled
+binary is standalone (no Bun runtime needed).
+
+### omp integration
+
+The `install.sh hook` command symlinks `hooks/load-lode.ts` into
+`~/.omp/agent/hooks/pre/`. This hook replaces omp's built-in lode loading with
+`lode startup`, which adds sublode summaries and tool help to the session-start
+context. The hook falls back silently if `lode` is not on PATH.
 
 ### Windows
 
@@ -27,7 +40,8 @@ Requires [Bun](https://bun.sh) to run the `.ts` file directly. The compiled bina
 bun build --compile lode.ts --outfile lode.exe
 ```
 
-Place `lode.exe` in a directory on PATH. No Bun installation needed for the binary.
+Place `lode.exe` in a directory on PATH. No Bun installation needed for the
+binary.
 
 ## Frontmatter schema
 
@@ -122,6 +136,31 @@ The tool finds the lode root in this order:
 - Term conflicts (same term name, different definition)
 - Files over 250 lines
 - Orphan files (no incoming links, not an entrypoint file)
+
+## Plans with lifecycle
+
+Plans in `plans/` carry a `status` field in their frontmatter:
+
+```yaml
+status: idea
+```
+
+The lifecycle: `idea` → `accepted` → `active` → `done` / `parked`.
+
+The roadmap and todos files collapse into `plans/` with status filtering. A completed plan's conclusions are absorbed into the lode domain files that own that knowledge. The plan is the mechanism; the lode file is the owner.
+
+## Repository contents
+
+```
+lode-cli/
+  lode.ts                       # the CLI tool (single file, zero dependencies)
+  hooks/
+    load-lode.ts                # omp startup hook (shells out to `lode startup`)
+  fragments/
+    lode-cli-extensions.md      # agent rules for the lode-cli extensions
+  install.sh                    # install CLI + hook
+  README.md
+```
 
 ## License
 
