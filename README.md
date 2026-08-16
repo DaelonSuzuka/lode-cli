@@ -2,7 +2,10 @@
 
 Mechanical acceleration for [lode](https://github.com/can1357/oh-my-pi)-style project knowledge bases.
 
-A lode is a directory of markdown files with optional YAML frontmatter. This tool indexes, searches, maps, and lints them. It is an acceleration layer, not a gate: `read`, `edit`, and `grep` work directly on the files at all times.
+A Lode is a directory of Markdown files with optional YAML frontmatter. Content
+commands index, search, map, and lint without modifying project files; use
+`read` and `edit` for direct access. Mail commands separately write mailbox and
+registry state under `~/.lode/`.
 
 ## Install
 
@@ -109,6 +112,7 @@ lode tags                 tag counts
 lode check                lint frontmatter, links, terms, line count, orphans
 lode precommit            report staged sources linked from lode files
 lode recent [N]           show patches for recent lode-touching commits
+lode plans [--status=S]  list and filter plans by lifecycle status
 lode mail send <project> <subject>   send inter-project mail (body on stdin)
 lode mail read                        show and mark unread mail
 lode mail list                        all mail for current project
@@ -205,18 +209,36 @@ The tool finds the lode root in this order:
 - Orphan files (no incoming links, not an entrypoint file)
 - Invalid or unsafe sublode ownership declarations
 - Invalid, escaping, or duplicate `sources` declarations
+- Missing or unknown lifecycle status on plan files
 
 ## Plans with lifecycle
 
-Plans in `plans/` carry a `status` field in their frontmatter:
+Plans in each owned Lode's `plans/` directory carry a `status` field:
 
 ```yaml
+---
 status: idea
+summary: Candidate intent and its current constraints
+---
 ```
 
-The lifecycle: `idea` → `accepted` → `active` → `done` / `parked`.
+The lifecycle is `idea` → `accepted` → `active` → `done` / `parked`.
 
-The roadmap and todos files collapse into `plans/` with status filtering. A completed plan's conclusions are absorbed into the lode domain files that own that knowledge. The plan is the mechanism; the lode file is the owner.
+```sh
+lode plans
+lode plans --status=active
+lode plans --status=idea
+```
+
+The unfiltered command merges root and declared-sublode plans and sorts them by
+lifecycle state, then path. Missing or unknown status remains visible in the
+unfiltered output and is reported by `lode check`; filters accept only the five
+recognized states.
+
+Roadmap and todo files collapse into `plans/`: active plans form the roadmap and
+idea plans form the backlog. A plan is an intent and coordination record, not a
+disposable task. It completes when its conclusions are absorbed into the Lode
+domain files that own that knowledge.
 
 ## Repository contents
 

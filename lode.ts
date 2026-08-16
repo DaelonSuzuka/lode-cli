@@ -2,9 +2,9 @@
 /**
  * lode — mechanical acceleration for project lodes.
  *
- * A directory of markdown files with optional YAML frontmatter. This tool
- * indexes, searches, maps, and lints them. It is an acceleration layer, not
- * a gate: read/edit/grep work directly on the files at all times.
+ * A directory of Markdown files with optional YAML frontmatter. Content
+ * commands inspect and index without modifying project files; use read/edit for
+ * direct access. Mail commands separately mutate state under ~/.lode/.
  *
  * Frontmatter schema (all optional, but summary + keywords are recommended):
  *   type:      domain | external
@@ -13,6 +13,7 @@
  *   summary:   one-line description for the map
  *   sublodes:  project-relative lode directory paths owned by this root
  *   sources:   project-relative source files documented by this lode file
+ *   status:    plan lifecycle state (plans only)
  *
  * Term blocks in the body:
  *   ## Terms
@@ -29,6 +30,7 @@
  *   lode check [--path=.]             lint frontmatter, links, terms, line count, orphans
  *   lode precommit [--path=.]         report staged sources linked from lode files
  *   lode recent [N] [--path=.]        show recent committed lode patches
+ *   lode plans [--status=S] [--path=.] list and filter plans by lifecycle
  */
 
 import * as fs from "node:fs";
@@ -46,6 +48,7 @@ interface Frontmatter {
 	summary?: string;
 	sublodes?: string[];
 	sources?: string[];
+	status?: string;
 	_raw?: Record<string, unknown>;
 }
 
@@ -121,6 +124,8 @@ function parseFrontmatter(content: string): { fm: Frontmatter; body: string } {
 			fm.type = value;
 		} else if (key === "summary" && typeof value === "string") {
 			fm.summary = value;
+		} else if (key === "status" && typeof value === "string") {
+			fm.status = value;
 		} else if (key === "tags") {
 			fm.tags = Array.isArray(value) ? value : parseList(value);
 		} else if (key === "keywords") {
@@ -601,6 +606,7 @@ The \`lode\` tool is available for searching and navigating this lode:
   lode check                lint frontmatter, links, terms, line count, orphans
   lode precommit            report staged source changes linked from lode files
   lode recent [N]           show patches for recent lode-touching commits
+  lode plans [--status=S]  list and filter plans by lifecycle status
   lode mail send <project> <subject>   send inter-project mail (body on stdin)
   lode mail read                        show and mark unread mail for current project
   lode mail unread                      print count of unread mail
@@ -624,6 +630,7 @@ function cmdSearch(root: string, args: string[]): void {
 			...(file.frontmatter.tags ?? []).map(t => t.toLowerCase()),
 			(file.frontmatter.summary ?? "").toLowerCase(),
 			(file.frontmatter.type ?? "").toLowerCase(),
+			(file.frontmatter.status ?? "").toLowerCase(),
 			path.basename(file.relPath, ".md").toLowerCase(),
 		];
 		let score = 0;
@@ -902,6 +909,56 @@ function cmdRecent(root: string, args: string[]): void {
 	if (!result.stdout.endsWith("\n")) process.stdout.write("\n");
 }
 
+const PLAN_STATUSES = ["idea", "accepted", "active", "done", "parked"];
+
+function ownedPlanRoots(root: string): string[] {
+	const projectRoot = path.dirname(root);
+	const lodeRoots = [
+		path.resolve(root),
+		...readSublodeConfig(root).paths.map(sub => path.resolve(projectRoot, sub)),
+	];
+	return lodeRoots.map(lodeRoot => path.join(lodeRoot, "plans"));
+}
+
+function isPlanFile(file: LodeFile, planRoots: string[]): boolean {
+	const absPath = path.resolve(file.absPath);
+	return planRoots.some(planRoot => isInsidePath(planRoot, absPath));
+}
+
+function cmdPlans(root: string, args: string[]): void {
+	let status: string | undefined;
+	for (const arg of args) {
+		if (arg.startsWith("--status=") && status === undefined) {
+			status = arg.slice("--status=".length);
+		} else {
+			console.error("Usage: lode plans [--status=idea|accepted|active|done|parked]");
+			process.exit(2);
+		}
+	}
+	if (status !== undefined && !PLAN_STATUSES.includes(status)) {
+		console.error(`Unknown plan status '${status}'. Expected: ${PLAN_STATUSES.join(", ")}`);
+		process.exit(2);
+	}
+
+	const planRoots = ownedPlanRoots(root);
+	let plans = loadAll(root).filter(file => isPlanFile(file, planRoots));
+	if (status) plans = plans.filter(file => file.frontmatter.status === status);
+	plans.sort((a, b) => {
+		const aOrder = PLAN_STATUSES.indexOf(a.frontmatter.status ?? "");
+		const bOrder = PLAN_STATUSES.indexOf(b.frontmatter.status ?? "");
+		const normalizedA = aOrder === -1 ? PLAN_STATUSES.length : aOrder;
+		const normalizedB = bOrder === -1 ? PLAN_STATUSES.length : bOrder;
+		return normalizedA - normalizedB || a.relPath.localeCompare(b.relPath);
+	});
+
+	for (const file of plans) {
+		const planStatus = file.frontmatter.status ?? "?";
+		const summary = file.frontmatter.summary ?? "(no summary)";
+		console.log(`[${planStatus}] ${file.relPath} — ${summary}`);
+	}
+	if (plans.length === 0) console.log("No plans match.");
+}
+
 function cmdCheck(root: string, _args: string[]): void {
 	const files = loadAll(root);
 	const allPaths = new Set(files.map(f => f.relPath));
@@ -912,6 +969,7 @@ function cmdCheck(root: string, _args: string[]): void {
 		issues.push({ file: rootSummary, issue, severity: "error" });
 	}
 	const projectRoot = canonicalProjectRoot(root);
+	const planRoots = ownedPlanRoots(root);
 
 	// Build incoming link map for orphan detection
 	const incoming = new Map<string, Set<string>>();
@@ -925,9 +983,10 @@ function cmdCheck(root: string, _args: string[]): void {
 	for (const file of files) {
 		const rel = file.relPath;
 		const fm = file.frontmatter;
+		const isPlan = isPlanFile(file, planRoots);
 
 		// Missing frontmatter
-		if (!fm.type && !fm.tags && !fm.keywords && !fm.summary && !fm.sublodes && !fm.sources) {
+		if (!fm.type && !fm.tags && !fm.keywords && !fm.summary && !fm.sublodes && !fm.sources && !fm.status) {
 			issues.push({ file: rel, issue: "no frontmatter", severity: "warn" });
 		}
 		// Missing type
@@ -943,6 +1002,16 @@ function cmdCheck(root: string, _args: string[]): void {
 		// Missing keywords
 		if (!fm.keywords || fm.keywords.length === 0) {
 			issues.push({ file: rel, issue: "missing keywords", severity: "warn" });
+		}
+		// Plan lifecycle
+		if (isPlan && !fm.status) {
+			issues.push({
+				file: rel,
+				issue: `missing plan status (${PLAN_STATUSES.join("|")})`,
+				severity: "warn",
+			});
+		} else if (isPlan && !PLAN_STATUSES.includes(fm.status!)) {
+			issues.push({ file: rel, issue: `unknown plan status '${fm.status}'`, severity: "warn" });
 		}
 		// Invalid or duplicate source relationships
 		const seenSources = new Set<string>();
@@ -1270,6 +1339,7 @@ const COMMANDS: Record<string, (root: string, args: string[]) => void> = {
 	check: cmdCheck,
 	precommit: cmdPrecommit,
 	recent: cmdRecent,
+	plans: cmdPlans,
 	mail: cmdMail,
 };
 
@@ -1286,6 +1356,7 @@ Commands:
   check                lint frontmatter, links, terms, line count, orphans
   precommit            report staged sources linked from lode files
   recent [N]           show patches for recent lode-touching commits
+  plans [--status=S]   list and filter plans by lifecycle status
   mail send <project> <subject>   send mail (body on stdin)
   mail read                        show and mark unread mail
   mail list                        all mail for current project

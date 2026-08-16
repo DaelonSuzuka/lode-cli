@@ -407,3 +407,103 @@ sources: [lode/src/app.ts]
 		expect(noHistory.stdout).toBe("No committed lode changes.\n");
 	});
 });
+
+describe("plan lifecycle", () => {
+	test("lists, orders, filters, and checks root and sublode plans", async () => {
+		const { project, lode } = makeFixture();
+		writeFile(path.join(lode, "summary.md"), `---
+sublodes: [module/lode]
+---
+# Root
+`);
+		writeFile(path.join(project, "module/lode/summary.md"), "# Module\n");
+		writeFile(path.join(lode, "plans/idea.md"), `---
+status: idea
+summary: Candidate plan
+---
+# Idea
+`);
+		writeFile(path.join(project, "module/lode/plans/accepted.md"), `---
+status: accepted
+summary: Accepted module plan
+---
+# Accepted
+`);
+		writeFile(path.join(lode, "plans/active.md"), `---
+status: active
+summary: Current work
+---
+# Active
+`);
+		writeFile(path.join(lode, "plans/done.md"), `---
+status: done
+summary: Completed work
+---
+# Done
+`);
+		writeFile(path.join(lode, "plans/parked.md"), `---
+status: parked
+summary: Deferred work
+---
+# Parked
+`);
+		writeFile(path.join(lode, "plans/missing.md"), `---
+summary: Missing status
+---
+# Missing
+`);
+		writeFile(path.join(lode, "plans/unknown.md"), `---
+status: blocked
+summary: Unknown status
+---
+# Unknown
+`);
+		writeFile(path.join(lode, "reference.md"), `---
+status: active
+summary: Not a plan
+---
+# Reference
+`);
+
+		const all = await run(lode, "plans");
+		expect(all.exitCode).toBe(0);
+		const expectedOrder = [
+			"[idea] lode/plans/idea.md",
+			"[accepted] module/lode/plans/accepted.md",
+			"[active] lode/plans/active.md",
+			"[done] lode/plans/done.md",
+			"[parked] lode/plans/parked.md",
+			"[?] lode/plans/missing.md",
+			"[blocked] lode/plans/unknown.md",
+		];
+		let previous = -1;
+		for (const entry of expectedOrder) {
+			const position = all.stdout.indexOf(entry);
+			expect(position).toBeGreaterThan(previous);
+			previous = position;
+		}
+		expect(all.stdout).not.toContain("reference.md");
+
+		const accepted = await run(lode, "plans", "--status=accepted");
+		expect(accepted.exitCode).toBe(0);
+		expect(accepted.stdout).toContain("module/lode/plans/accepted.md");
+		expect(accepted.stdout).not.toContain("lode/plans/idea.md");
+
+		const active = await run(lode, "plans", "--status=active");
+		expect(active.stdout).toContain("lode/plans/active.md");
+		expect(active.stdout).not.toContain("reference.md");
+
+		const invalid = await run(lode, "plans", "--status=blocked");
+		expect(invalid.exitCode).toBe(2);
+		expect(invalid.stderr).toContain("Unknown plan status 'blocked'");
+
+		const emptyStatus = await run(lode, "plans", "--status=");
+		expect(emptyStatus.exitCode).toBe(2);
+		expect(emptyStatus.stderr).toContain("Unknown plan status ''");
+
+		const checked = await run(lode, "check");
+		expect(checked.stdout).toContain("lode/plans/missing.md: missing plan status");
+		expect(checked.stdout).toContain("lode/plans/unknown.md: unknown plan status 'blocked'");
+		expect(checked.stdout).not.toContain("reference.md: unknown plan status");
+	});
+});

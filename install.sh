@@ -1,6 +1,5 @@
 #!/bin/sh
-# Install lode-cli: the CLI tool, the omp startup hook, and lode-specific
-# agent rules.
+# Install lode-cli: the CLI tool and the optional omp startup hook.
 #
 #   ./install.sh           install everything
 #   ./install.sh cli       CLI only (symlink to ~/.local/bin/lode)
