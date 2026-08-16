@@ -347,7 +347,10 @@ function cmdStartup(root: string, _args: string[]): void {
 	const hasLode = fs.existsSync(path.join(root, "summary.md"))
 		|| fs.existsSync(path.join(root, "lode-map.md"))
 		|| fs.existsSync(path.join(root, "terminology.md"));
-	if (!hasLode) return;
+	if (!hasLode) {
+		process.stderr.write("lode: no lode found at " + root + "\n");
+		return;
+	}
 
 	const sections: string[] = [];
 	let used = 0;
