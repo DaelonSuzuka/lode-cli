@@ -21,7 +21,7 @@
  *
  * Usage:
  *   lode startup [--path=.]           dump entrypoint files for session start
- *   lode search <query> [--path=.]    match keywords, tags, type, summary, filename
+ *   lode search <query> [--content] [--under=PATH] [--path=.]
  *   lode list [--type=T] [--tag=T] [--path=.]
  *   lode walk <file>                  resolve internal links, show linked summaries
  *   lode map [--path=.]               print index from frontmatter
@@ -57,6 +57,7 @@ interface LodeFile {
 	absPath: string;
 	frontmatter: Frontmatter;
 	body: string;
+	bodyLineOffset: number;
 	lines: number;
 	terms: TermEntry[];
 	links: string[];       // resolved relative paths this file links to
@@ -82,13 +83,16 @@ interface TermEntry {
 // Keep the parser aligned with the actual frontmatter schema; use a real YAML
 // parser if the schema later requires general YAML semantics.
 
-function parseFrontmatter(content: string): { fm: Frontmatter; body: string } {
+function parseFrontmatter(content: string): { fm: Frontmatter; body: string; bodyLineOffset: number } {
 	const fm: Frontmatter = { _raw: {} };
-	if (!content.startsWith("---")) return { fm, body: content };
+	if (!content.startsWith("---")) return { fm, body: content, bodyLineOffset: 0 };
 	const end = content.indexOf("\n---", 3);
-	if (end === -1) return { fm, body: content };
+	if (end === -1) return { fm, body: content, bodyLineOffset: 0 };
 	const block = content.slice(3, end).trim();
-	const body = content.slice(end + 4).replace(/^\n/, "");
+	let bodyStart = end + 4;
+	if (content[bodyStart] === "\n") bodyStart++;
+	const body = content.slice(bodyStart);
+	const bodyLineOffset = content.slice(0, bodyStart).split("\n").length - 1;
 	const lines = block.split("\n");
 
 	for (let i = 0; i < lines.length; i++) {
@@ -137,7 +141,7 @@ function parseFrontmatter(content: string): { fm: Frontmatter; body: string } {
 		}
 		(fm._raw as Record<string, unknown>)[key] = value;
 	}
-	return { fm, body };
+	return { fm, body, bodyLineOffset };
 }
 
 function unquoteListItem(value: string): string {
@@ -371,7 +375,7 @@ function readSublodeConfig(lodeRoot: string): SublodeConfig {
 function loadFile(relPath: string, root: string): LodeFile {
 	const absPath = path.join(root, relPath);
 	const content = fs.readFileSync(absPath, "utf8");
-	const { fm, body } = parseFrontmatter(content);
+	const { fm, body, bodyLineOffset } = parseFrontmatter(content);
 	const terms = parseTerms(body).map(t => ({ ...t, source: relPath }));
 	const links = extractLinks(body, relPath, root);
 	return {
@@ -379,19 +383,21 @@ function loadFile(relPath: string, root: string): LodeFile {
 		absPath,
 		frontmatter: fm,
 		body,
+		bodyLineOffset,
 		lines: content.split("\n").length,
 		terms,
 		links,
 	};
 }
 
-function loadAll(root: string): LodeFile[] {
+function loadAll(root: string, include?: (relPath: string) => boolean): LodeFile[] {
 	fileIndex = null; // reset wiki-link cache
 	const projectRoot = path.dirname(root);
 	const files: LodeFile[] = [];
 
 	// root lode files — paths relative to project root (e.g. "lode/summary.md")
 	for (const rel of walkMd(root, projectRoot)) {
+		if (include && !include(rel)) continue;
 		try {
 			files.push(loadFile(rel, projectRoot));
 		} catch { /* skip unreadable */ }
@@ -401,6 +407,7 @@ function loadAll(root: string): LodeFile[] {
 	for (const sub of readSublodeConfig(root).paths) {
 		const subRoot = path.join(projectRoot, sub);
 		for (const rel of walkMd(subRoot, projectRoot)) {
+			if (include && !include(rel)) continue;
 			try {
 				files.push(loadFile(rel, projectRoot));
 			} catch { /* skip unreadable */ }
@@ -597,7 +604,7 @@ function cmdStartup(root: string, _args: string[]): void {
 const TOOL_HELP = `=== lode-cli ===
 The \`lode\` tool is available for searching and navigating this lode:
 
-  lode search <query>       find files by keywords, tags, summary, or filename
+  lode search <query>       metadata search; add --content and optional --under=PATH for full text
   lode list [--type=T] [--tag=T]   list files, optionally filtered
   lode walk <file-or-dir>   follow internal links, show linked summaries
   lode map                  print directory index from frontmatter
@@ -615,13 +622,97 @@ Use these instead of manually grepping the lode directory. The files are still
 plain markdown — read and edit them directly when you know which file you need.`;
 
 function cmdSearch(root: string, args: string[]): void {
-	const query = args.join(" ").toLowerCase();
+	const contentMode = args.includes("--content");
+	const jsonMode = args.includes("--json");
+	const limitArg = args.find(arg => arg.startsWith("--limit="));
+	const underArg = args.find(arg => arg.startsWith("--under="));
+	const queryArg = args.find(arg => arg.startsWith("--query="));
+	const limit = limitArg ? Number.parseInt(limitArg.slice("--limit=".length), 10) : 20;
+	if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+		console.error("lode search: --limit must be an integer from 1 to 100");
+		process.exit(2);
+	}
+
+	let under: string | undefined;
+	if (underArg) {
+		const raw = underArg.slice("--under=".length);
+		if (!raw || path.isAbsolute(raw)) {
+			console.error("lode search: --under must be a non-empty project-relative path");
+			process.exit(2);
+		}
+		under = path.normalize(raw);
+		if (under === ".." || under.startsWith(`..${path.sep}`)) {
+			console.error("lode search: --under may not escape the project root");
+			process.exit(2);
+		}
+		if (under === ".") under = undefined;
+	}
+
+	const positional = args.filter(arg =>
+		arg !== "--content" &&
+		arg !== "--json" &&
+		!arg.startsWith("--limit=") &&
+		!arg.startsWith("--under=") &&
+		!arg.startsWith("--query=")
+	);
+	if (queryArg && positional.length > 0) {
+		console.error("lode search: use either positional query text or --query, not both");
+		process.exit(2);
+	}
+	const query = (queryArg ? queryArg.slice("--query=".length) : positional.join(" ")).trim().toLowerCase();
 	if (!query) {
-		console.error("Usage: lode search <query>");
+		console.error("Usage: lode search <query> [--content] [--under=PATH] [--json] [--limit=N]");
 		process.exit(2);
 	}
 	const terms = query.split(/\s+/).filter(Boolean);
-	const files = loadAll(root);
+	const include = under
+		? (relPath: string) => relPath === under || relPath.startsWith(`${under}${path.sep}`)
+		: undefined;
+	const files = loadAll(root, include);
+
+	if (contentMode) {
+		const results: Array<{
+			path: string;
+			score: number;
+			summary: string | null;
+			matches: Array<{ line: number; text: string }>;
+		}> = [];
+		for (const file of files) {
+			const folded = file.body.toLowerCase();
+			if (!terms.every(term => folded.includes(term))) continue;
+			let score = 0;
+			for (const term of terms) score += folded.split(term).length - 1;
+			const matches: Array<{ line: number; text: string }> = [];
+			const lines = file.body.split("\n");
+			for (let index = 0; index < lines.length && matches.length < 3; index++) {
+				const foldedLine = lines[index].toLowerCase();
+				if (!terms.some(term => foldedLine.includes(term))) continue;
+				const text = lines[index].trim().replace(/\s+/g, " ");
+				matches.push({
+					line: index + 1 + file.bodyLineOffset,
+					text: text.length > 240 ? `${text.slice(0, 237)}...` : text,
+				});
+			}
+			results.push({
+				path: file.relPath.split(path.sep).join("/"),
+				score,
+				summary: file.frontmatter.summary ?? null,
+				matches,
+			});
+		}
+		results.sort((a, b) => b.score - a.score || a.path.localeCompare(b.path));
+		const bounded = results.slice(0, limit);
+		if (jsonMode) {
+			console.log(JSON.stringify({ query, scope: "content", under: under ?? null, total: results.length, results: bounded }, null, 2));
+			return;
+		}
+		for (const result of bounded) {
+			for (const match of result.matches) console.log(`${result.path}:${match.line}: ${match.text}`);
+		}
+		if (bounded.length === 0) console.log("No matches.");
+		else if (results.length > bounded.length) console.log(`... ${results.length - bounded.length} more matching files`);
+		return;
+	}
 
 	const results: Array<{ file: LodeFile; score: number }> = [];
 	for (const file of files) {
@@ -642,13 +733,30 @@ function cmdSearch(root: string, args: string[]): void {
 		if (score > 0) results.push({ file, score });
 	}
 
-	results.sort((a, b) => b.score - a.score);
-	for (const { file, score } of results) {
+	results.sort((a, b) => b.score - a.score || a.file.relPath.localeCompare(b.file.relPath));
+	const bounded = results.slice(0, limit);
+	if (jsonMode) {
+		console.log(JSON.stringify({
+			query,
+			scope: "metadata",
+			under: under ?? null,
+			total: results.length,
+			results: bounded.map(({ file, score }) => ({
+				path: file.relPath.split(path.sep).join("/"),
+				score,
+				summary: file.frontmatter.summary ?? null,
+				tags: file.frontmatter.tags ?? [],
+			})),
+		}, null, 2));
+		return;
+	}
+	for (const { file, score } of bounded) {
 		const summary = file.frontmatter.summary ?? "(no summary)";
 		const tags = file.frontmatter.tags?.length ? ` [${file.frontmatter.tags.join(", ")}]` : "";
 		console.log(`${file.relPath} (${score}) — ${summary}${tags}`);
 	}
-	if (results.length === 0) console.log("No matches.");
+	if (bounded.length === 0) console.log("No matches.");
+	else if (results.length > bounded.length) console.log(`... ${results.length - bounded.length} more matching files`);
 }
 
 function cmdList(root: string, args: string[]): void {
@@ -1347,7 +1455,7 @@ const USAGE = `Usage: lode <command> [args] [--path=DIR]
 
 Commands:
   startup              dump entrypoint files for session start
-  search <query>       match keywords, tags, type, summary, filename
+  search <query>       metadata search; --content enables full text, --under=PATH scopes reads
   list [--type=T] [--tag=T]   list files, optionally filtered
   walk <file-or-dir>   resolve internal links, show linked summaries
   map                  print index from frontmatter
@@ -1363,7 +1471,12 @@ Commands:
   mail unread                      print count of unread mail
 
 Options:
-  --path=DIR           lode root directory (auto-detected if omitted)`;
+  --path=DIR           lode root directory (auto-detected if omitted)
+  --query=TEXT         pass exact machine-generated query text without positional flag ambiguity
+  --content            search Markdown bodies instead of metadata
+  --under=PATH         restrict search to a reported project-relative file or directory
+  --limit=N            return at most N files (1-100, default 20)
+  --json               emit bounded machine-readable search results`;
 
 const [cmd, ...rest] = process.argv.slice(2);
 if (!cmd || cmd === "--help" || cmd === "-h") {

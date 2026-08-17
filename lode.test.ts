@@ -186,6 +186,81 @@ sublodes:
 	});
 });
 
+describe("search modes", () => {
+	test("preserves metadata search and makes content search opt-in", async () => {
+		const { lode } = makeFixture();
+		writeFile(path.join(lode, "summary.md"), `---
+type: domain
+tags: [archive]
+keywords: storage
+summary: Root summary
+---
+# Root
+
+ordinary body
+`);
+		writeFile(path.join(lode, "notes/alpha.md"), `---
+summary: Alpha
+---
+# Alpha
+
+Needle appears here.
+`);
+		writeFile(path.join(lode, "notes/flags.md"), "# Flags\n\nLiteral --content token.\n");
+
+		const metadata = await run(lode, "search", "storage");
+		expect(metadata.exitCode).toBe(0);
+		expect(metadata.stdout).toContain("lode/summary.md");
+
+		const defaultBodySearch = await run(lode, "search", "needle");
+		expect(defaultBodySearch.stdout).toBe("No matches.\n");
+
+		const content = await run(lode, "search", "needle", "--content");
+		expect(content.exitCode).toBe(0);
+		expect(content.stdout).toContain("lode/notes/alpha.md:6: Needle appears here.");
+
+		const machineQuery = await run(lode, "search", "--query=--content", "--content");
+		expect(machineQuery.exitCode).toBe(0);
+		expect(machineQuery.stdout).toContain("lode/notes/flags.md:3: Literal --content token.");
+
+		const whitespace = await run(lode, "search", "--query=   ", "--content", "--json");
+		expect(whitespace.exitCode).toBe(2);
+		expect(whitespace.stderr).toContain("Usage: lode search");
+	});
+
+	test("scopes content reads by reported project-relative path and emits bounded JSON", async () => {
+		const { lode } = makeFixture();
+		writeFile(path.join(lode, "summary.md"), "# Root\n");
+		writeFile(path.join(lode, "one/inside.md"), "# Inside\n\nTarget phrase one.\nTarget phrase two.\n");
+		writeFile(path.join(lode, "two/outside.md"), "# Outside\n\nTarget phrase outside.\n");
+
+		const result = await run(
+			lode,
+			"search",
+			"target phrase",
+			"--content",
+			"--under=lode/one",
+			"--limit=1",
+			"--json",
+		);
+		expect(result.exitCode).toBe(0);
+		const parsed = JSON.parse(result.stdout);
+		expect(parsed).toMatchObject({
+			query: "target phrase",
+			scope: "content",
+			under: "lode/one",
+			total: 1,
+		});
+		expect(parsed.results).toHaveLength(1);
+		expect(parsed.results[0].path).toBe("lode/one/inside.md");
+		expect(parsed.results[0].matches).toHaveLength(2);
+
+		const escaping = await run(lode, "search", "target", "--content", "--under=../outside");
+		expect(escaping.exitCode).toBe(2);
+		expect(escaping.stderr).toContain("may not escape the project root");
+	});
+});
+
 describe("Git workflow commands", () => {
 	test("precommit reports staged files linked by root and sublode sources", async () => {
 		const { project, lode } = makeFixture();

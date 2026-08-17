@@ -103,7 +103,7 @@ Define terminology inline in any file:
 
 ```
 lode startup              dump entrypoint files for session start
-lode search <query>       match keywords, tags, type, summary, filename
+lode search <query>       metadata search; --content enables bounded full text
 lode list [--type=T] [--tag=T]   list files, optionally filtered
 lode walk <file-or-dir>   resolve internal links, show linked summaries
 lode map                  print directory index from frontmatter
@@ -122,6 +122,28 @@ lode mail unread                      print count of unread mail
 ### `--path=DIR`
 
 Overrides the lode root directory. If omitted, the tool auto-detects by walking up from the current directory looking for a `lode/` subdirectory or a directory containing `lode-map.md` or `summary.md`.
+
+### Search modes
+
+`lode search <query>` keeps the metadata-first behavior: it matches keywords,
+tags, type, lifecycle status, summary, and filename. Full text is explicit:
+
+```bash
+lode search snapshots --content
+lode search snapshots --content --under=lode/machines/cradle
+```
+
+`--under` accepts a project-relative file or directory exactly as printed by
+Lode commands. The loader filters paths before reading Markdown bodies, allowing
+a metadata pass to identify a subtree and a second content pass to search only
+that scope. Absolute and project-escaping scopes are rejected.
+
+Search results are bounded to 20 files by default; `--limit=N` accepts 1-100.
+Text mode emits at most three anchored snippets per file. `--json` emits the
+same bounded results as a stable machine-readable object.
+Machine callers should pass exact query text as `--query=TEXT`; it cannot be
+mistaken for a search flag. Positional query text remains the concise human
+interface, and mixing positional text with `--query` is rejected.
 
 ## Sublodes
 
