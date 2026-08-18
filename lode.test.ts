@@ -582,3 +582,225 @@ summary: Not a plan
 		expect(checked.stdout).not.toContain("reference.md: unknown plan status");
 	});
 });
+
+describe("map routing check", () => {
+	test("warns only for files the curated map does not link", async () => {
+		const { lode } = makeFixture();
+		const frontmatter = (summary: string) => `---
+type: domain
+keywords:
+  - routing
+summary: ${summary}
+---
+`;
+		writeFile(path.join(lode, "summary.md"), `${frontmatter("Root summary")}# Root\n`);
+		writeFile(path.join(lode, "terminology.md"), `${frontmatter("Terms")}# Terms\n`);
+		writeFile(
+			path.join(lode, "lode-map.md"),
+			`${frontmatter("Map")}# Map\n\n- [\`routed.md\`](routed.md) — reached from the map\n- [\`auth/summary.md\`](auth/summary.md) — the auth area\n`,
+		);
+		// Routing relays onward through a summary, so sessions.md is reached.
+		writeFile(
+			path.join(lode, "routed.md"),
+			`${frontmatter("Routed")}# Routed\n\nSee [\`deep.md\`](deep.md).\n`,
+		);
+		// Linked only from a non-summary domain file: a peer cross-link is not a route.
+		writeFile(path.join(lode, "deep.md"), `${frontmatter("Deep")}# Deep\n`);
+		// Named in prose by another domain file, but never routed from the map.
+		writeFile(
+			path.join(lode, "mentioned.md"),
+			`${frontmatter("Mentioned")}# Mentioned\n\nSee [\`routed.md\`](routed.md).\n`,
+		);
+		writeFile(
+			path.join(lode, "auth/summary.md"),
+			`${frontmatter("Auth area")}# Auth\n\n- [\`sessions.md\`](sessions.md) — session storage\n`,
+		);
+		writeFile(path.join(lode, "auth/sessions.md"), `${frontmatter("Sessions")}# Sessions\n`);
+		// In the same folder, but the area summary does not route it.
+		writeFile(path.join(lode, "auth/tokens.md"), `${frontmatter("Tokens")}# Tokens\n`);
+		writeFile(
+			path.join(lode, "plans/idea.md"),
+			`---\ntype: domain\nkeywords:\n  - plan\nsummary: A plan\nstatus: idea\n---\n# Plan\n`,
+		);
+
+		const checked = await run(lode, "check");
+		expect(checked.exitCode).toBe(0);
+		expect(checked.stdout).toContain("lode/mentioned.md: unrouted");
+		expect(checked.stdout).toContain("lode/auth/tokens.md: unrouted");
+		// Routed, entrypoints, and transient plans stay silent.
+		expect(checked.stdout).not.toContain("lode/routed.md: unrouted");
+		expect(checked.stdout).not.toContain("lode/summary.md: unrouted");
+		expect(checked.stdout).not.toContain("lode/terminology.md: unrouted");
+		expect(checked.stdout).not.toContain("lode/lode-map.md: unrouted");
+		expect(checked.stdout).not.toContain("lode/auth/summary.md: unrouted");
+		expect(checked.stdout).not.toContain("lode/plans/idea.md: unrouted");
+		expect(checked.stdout).not.toContain("lode/auth/sessions.md: unrouted");
+		// A non-summary file does not relay routing to its own links.
+		expect(checked.stdout).toContain("lode/deep.md: unrouted");
+	});
+
+	test("exempts an owned sublode's own entrypoints but not its domain summaries", async () => {
+		const { project, lode } = makeFixture();
+		const frontmatter = (summary: string) => `---
+type: domain
+keywords:
+  - routing
+summary: ${summary}
+---
+`;
+		writeFile(
+			path.join(lode, "summary.md"),
+			`---\ntype: domain\nkeywords:\n  - root\nsummary: Root\nsublodes:\n  - module/lode\n---\n# Root\n`,
+		);
+		writeFile(path.join(lode, "lode-map.md"), `${frontmatter("Map")}# Map\n`);
+		writeFile(path.join(project, "module/lode/summary.md"), `${frontmatter("Module")}# Module\n`);
+		writeFile(path.join(project, "module/lode/parser/summary.md"), `${frontmatter("Parser")}# Parser\n`);
+
+		const checked = await run(lode, "check");
+		expect(checked.stdout).not.toContain("module/lode/summary.md: unrouted");
+		expect(checked.stdout).toContain("module/lode/parser/summary.md: unrouted");
+	});
+});
+
+describe("map output", () => {
+	test("summarizes plans by status and sorts entries within a directory", async () => {
+		const { lode } = makeFixture();
+		const plan = (summary: string, status: string) =>
+			`---\ntype: domain\nkeywords:\n  - plan\nsummary: ${summary}\nstatus: ${status}\n---\n# Plan\n`;
+		writeFile(
+			path.join(lode, "summary.md"),
+			`---\ntype: domain\nkeywords:\n  - root\nsummary: Root summary\n---\n# Root\n`,
+		);
+		writeFile(
+			path.join(lode, "zebra.md"),
+			`---\ntype: domain\nkeywords:\n  - z\nsummary: Zebra file\n---\n# Zebra\n`,
+		);
+		writeFile(
+			path.join(lode, "alpha.md"),
+			`---\ntype: domain\nkeywords:\n  - a\nsummary: Alpha file\n---\n# Alpha\n`,
+		);
+		writeFile(path.join(lode, "plans/one.md"), plan("First", "idea"));
+		writeFile(path.join(lode, "plans/two.md"), plan("Second", "done"));
+		writeFile(path.join(lode, "plans/three.md"), plan("Third", "idea"));
+
+		const mapped = await run(lode, "map");
+		expect(mapped.exitCode).toBe(0);
+		expect(mapped.stdout).toContain("3 plan(s) — 2 idea, 1 done — see `lode plans`");
+		// Individual plan filenames and summaries stay out of the inventory.
+		expect(mapped.stdout).not.toContain("one.md");
+		expect(mapped.stdout).not.toContain("First");
+		expect(mapped.stdout.indexOf("alpha.md")).toBeLessThan(mapped.stdout.indexOf("zebra.md"));
+	});
+});
+
+describe("walk path resolution", () => {
+	test("resolves lode-relative and project-relative targets, and directories", async () => {
+		const { lode } = makeFixture();
+		const frontmatter = (summary: string) => `---
+type: domain
+keywords:
+  - walking
+summary: ${summary}
+---
+`;
+		writeFile(path.join(lode, "summary.md"), `${frontmatter("Root summary")}# Root\n`);
+		writeFile(
+			path.join(lode, "lode-map.md"),
+			`${frontmatter("Map")}# Map\n\n- [\`auth/summary.md\`](auth/summary.md) — the auth area\n`,
+		);
+		writeFile(path.join(lode, "auth/summary.md"), `${frontmatter("Auth area")}# Auth\n`);
+
+		// The shape a session types.
+		const lodeRelative = await run(lode, "walk", "lode-map.md");
+		expect(lodeRelative.exitCode).toBe(0);
+		expect(lodeRelative.stdout).toContain("lode/lode-map.md");
+		expect(lodeRelative.stdout).toContain("→ lode/auth/summary.md — Auth area");
+
+		// The shape every other command prints.
+		const projectRelative = await run(lode, "walk", "lode/lode-map.md");
+		expect(projectRelative.exitCode).toBe(0);
+		expect(projectRelative.stdout).toContain("→ lode/auth/summary.md — Auth area");
+
+		const directory = await run(lode, "walk", "auth");
+		expect(directory.exitCode).toBe(0);
+		expect(directory.stdout).toContain("lode/auth/summary.md");
+
+		const missing = await run(lode, "walk", "nope.md");
+		expect(missing.exitCode).toBe(1);
+	});
+});
+
+describe("outward routes", () => {
+	test("accepts links to existing product artifacts and still catches dead paths", async () => {
+		const { project, lode } = makeFixture();
+		const frontmatter = (summary: string) => `---
+type: domain
+keywords:
+  - outward
+summary: ${summary}
+---
+`;
+		writeFile(path.join(project, "src/contract.md"), "# Product contract\n");
+		writeFile(path.join(lode, "summary.md"), `${frontmatter("Root summary")}# Root\n`);
+		writeFile(
+			path.join(lode, "lode-map.md"),
+			`${frontmatter("Map")}# Map\n\n- [\`contract\`](../src/contract.md) — product-owned\n- [\`gone\`](../src/removed.md) — deleted\n`,
+		);
+
+		const checked = await run(lode, "check");
+		expect(checked.stdout).not.toContain("broken link → src/contract.md");
+		expect(checked.stdout).toContain("broken link → src/removed.md");
+	});
+});
+
+describe("line budget", () => {
+	test("exempts a declared accumulator and rejects an unknown value", async () => {
+		const { lode } = makeFixture();
+		const long = `${"filler\n".repeat(300)}`;
+		writeFile(path.join(lode, "summary.md"), `---
+type: domain
+keywords:
+  - budget
+summary: Root summary
+---
+# Root
+
+- [\`journal.md\`](journal.md) — the record
+- [\`sprawl.md\`](sprawl.md) — a topic
+- [\`typo.md\`](typo.md) — a bad value
+`);
+		writeFile(path.join(lode, "journal.md"), `---
+type: domain
+keywords:
+  - record
+summary: Append-only record
+line-budget: exempt
+---
+# Journal
+
+${long}`);
+		writeFile(path.join(lode, "sprawl.md"), `---
+type: domain
+keywords:
+  - topic
+summary: An overgrown topic
+---
+# Sprawl
+
+${long}`);
+		writeFile(path.join(lode, "typo.md"), `---
+type: domain
+keywords:
+  - typo
+summary: Misspelled opt-out
+line-budget: exmpt
+---
+# Typo
+`);
+
+		const checked = await run(lode, "check");
+		expect(checked.stdout).not.toContain("lode/journal.md: 30");
+		expect(checked.stdout).toContain("lode/sprawl.md: 30");
+		expect(checked.stdout).toContain("lode/typo.md: unknown line-budget 'exmpt' (expected: exempt)");
+	});
+});

@@ -14,6 +14,8 @@
  *   sublodes:  project-relative lode directory paths owned by this root
  *   sources:   project-relative source files documented by this lode file
  *   status:    plan lifecycle state (plans only)
+ *   line-budget: `exempt` — opt out of the 250-line limit, for a file whose role
+ *              is append-only record rather than a topic read on purpose
  *
  * Term blocks in the body:
  *   ## Terms
@@ -49,6 +51,7 @@ interface Frontmatter {
 	sublodes?: string[];
 	sources?: string[];
 	status?: string;
+	lineBudget?: string;
 	_raw?: Record<string, unknown>;
 }
 
@@ -130,6 +133,8 @@ function parseFrontmatter(content: string): { fm: Frontmatter; body: string; bod
 			fm.summary = value;
 		} else if (key === "status" && typeof value === "string") {
 			fm.status = value;
+		} else if (key === "line-budget" && typeof value === "string") {
+			fm.lineBudget = value;
 		} else if (key === "tags") {
 			fm.tags = Array.isArray(value) ? value : parseList(value);
 		} else if (key === "keywords") {
@@ -594,6 +599,14 @@ function cmdStartup(root: string, _args: string[]): void {
 	if (subSummaries.length > 0) {
 		console.log("\n" + subSummaries.join("\n"));
 	}
+	// A pointer, not an inventory. Injecting the generated index would duplicate
+	// the curated map's routing in flat form, and the pair drifts unnoticed; naming
+	// the command that prints it costs one line and demonstrates the tool in place.
+	// The real count is here so a session can judge whether the inventory is worth
+	// a call at this lode's size.
+	console.log(
+		`\n=== lode map ===\n${loadAll(root).length} files in this lode. \`lode map\` prints the one-line inventory; \`lode search <query>\` finds one.`,
+	);
 	if (omitted.length > 0) {
 		console.log(`\n=== over the ${BUDGET}-char budget, NOT loaded — read these ===`);
 		console.log(omitted.map(o => `- ${o}`).join("\n"));
@@ -610,7 +623,7 @@ The \`lode\` tool is available for searching and navigating this lode:
   lode map                  print directory index from frontmatter
   lode terms                aggregate term blocks across the lode
   lode tags                 show tag frequency counts
-  lode check                lint frontmatter, links, terms, line count, orphans
+  lode check                lint frontmatter, links, terms, line count, map routing
   lode precommit            report staged source changes linked from lode files
   lode recent [N]           show patches for recent lode-touching commits
   lode plans [--status=S]  list and filter plans by lifecycle status
@@ -782,17 +795,24 @@ function cmdWalk(root: string, args: string[]): void {
 	const all = loadAll(root);
 	const byPath = new Map(all.map(f => [f.relPath, f]));
 
-	const targetPath = path.join(root, target);
+	// `relPath` keys are project-relative ("lode/foo.md"), so a lode-relative
+	// target has to be normalized before lookup. Accept both forms: the shape a
+	// session types ("foo.md") and the shape every other command prints
+	// ("lode/foo.md").
+	const relBase = path.dirname(root);
+	const insideLode = path.resolve(root, target);
+	const absTarget = fs.existsSync(insideLode) ? insideLode : path.resolve(relBase, target);
+	const rel = path.relative(relBase, absTarget);
 	let isDir = false;
 	try {
-		isDir = fs.statSync(targetPath).isDirectory();
+		isDir = fs.statSync(absTarget).isDirectory();
 	} catch {
 		console.error(`Not found: ${target}`);
 		process.exit(1);
 	}
 	const startFiles = isDir
-		? all.filter(f => f.relPath.startsWith(target + "/") || f.relPath.startsWith(target + path.sep))
-		: [byPath.get(target)].filter(Boolean) as LodeFile[];
+		? all.filter(f => f.relPath.startsWith(rel + "/") || f.relPath.startsWith(rel + path.sep))
+		: [byPath.get(rel)].filter(Boolean) as LodeFile[];
 
 	if (startFiles.length === 0) {
 		console.error(`No files found at: ${target}`);
@@ -825,6 +845,7 @@ function cmdWalk(root: string, args: string[]): void {
 
 function cmdMap(root: string, _args: string[]): void {
 	const files = loadAll(root);
+	const planRoots = ownedPlanRoots(root);
 
 	// group by directory
 	const byDir = new Map<string, LodeFile[]>();
@@ -836,8 +857,27 @@ function cmdMap(root: string, _args: string[]): void {
 
 	const dirs = [...byDir.keys()].sort();
 	for (const dir of dirs) {
+		const entries = byDir.get(dir)!.sort((a, b) => a.relPath.localeCompare(b.relPath));
 		if (dir !== ".") console.log(`\n${dir}/`);
-		for (const file of byDir.get(dir)!) {
+
+		// Plans are summarized, not enumerated. Their load-bearing field is
+		// lifecycle status, which this inventory drops — a `done` plan awaiting
+		// deletion reads as live work here. `lode plans` is their view. The count
+		// still prints, so a session reading only the map cannot conclude that a
+		// lode with plans has none.
+		if (entries.every(file => isPlanFile(file, planRoots))) {
+			const byStatus = PLAN_STATUSES.map(status => ({
+				status,
+				count: entries.filter(file => file.frontmatter.status === status).length,
+			})).filter(entry => entry.count > 0);
+			const unknown = entries.length - byStatus.reduce((sum, entry) => sum + entry.count, 0);
+			if (unknown > 0) byStatus.push({ status: "no status", count: unknown });
+			const breakdown = byStatus.map(entry => `${entry.count} ${entry.status}`).join(", ");
+			console.log(`  ${entries.length} plan(s) — ${breakdown} — see \`lode plans\``);
+			continue;
+		}
+
+		for (const file of entries) {
 			const summary = file.frontmatter.summary ?? path.basename(file.relPath);
 			console.log(`  ${path.basename(file.relPath)} — ${summary}`);
 		}
@@ -1019,13 +1059,54 @@ function cmdRecent(root: string, args: string[]): void {
 
 const PLAN_STATUSES = ["idea", "accepted", "active", "done", "parked"];
 
-function ownedPlanRoots(root: string): string[] {
+function ownedLodeRoots(root: string): string[] {
 	const projectRoot = path.dirname(root);
-	const lodeRoots = [
+	return [
 		path.resolve(root),
 		...readSublodeConfig(root).paths.map(sub => path.resolve(projectRoot, sub)),
 	];
-	return lodeRoots.map(lodeRoot => path.join(lodeRoot, "plans"));
+}
+
+function ownedPlanRoots(root: string): string[] {
+	return ownedLodeRoots(root).map(lodeRoot => path.join(lodeRoot, "plans"));
+}
+
+/**
+ * Reachability is "a path from the map reaches this file", not "some file links
+ * it".
+ *
+ * `lode-map.md` is the curated routing authority: it carries areas, read order,
+ * traps, and outward routes to product artifacts that frontmatter cannot imply,
+ * while `lode map` prints the mechanical inventory so the map never duplicates
+ * it. A prose mention in a domain file is therefore not a route — a file can be
+ * named in passing by three files and still sit off every path a session takes.
+ *
+ * Routing relays only through summaries: the map names areas, and each area's
+ * `summary.md` routes its own files. That keeps the map bounded by area count
+ * instead of file count, which is what lets it stay an entry file. A domain
+ * file's "Related" list is a cross-link between peers, not a route inward.
+ *
+ * Plans are exempt. They are transient by construction, so a curated map line
+ * would be born with a deletion date; `lode plans` is their view and carries the
+ * lifecycle status that a flat inventory strips.
+ */
+function routedFromMap(root: string, files: LodeFile[]): Set<string> {
+	const byPath = new Map(files.map(file => [file.relPath, file]));
+	const relBase = path.resolve(path.dirname(root));
+	const queue = ownedLodeRoots(root).flatMap(dir =>
+		["lode-map.md", "summary.md"].map(name => path.relative(relBase, path.join(dir, name))),
+	);
+	const routed = new Set<string>();
+	while (queue.length > 0) {
+		const file = byPath.get(queue.pop()!);
+		if (!file) continue;
+		for (const link of file.links) {
+			if (routed.has(link)) continue;
+			routed.add(link);
+			if (path.basename(link) === "summary.md") queue.push(link);
+		}
+	}
+	return routed;
 }
 
 function isPlanFile(file: LodeFile, planRoots: string[]): boolean {
@@ -1079,14 +1160,18 @@ function cmdCheck(root: string, _args: string[]): void {
 	const projectRoot = canonicalProjectRoot(root);
 	const planRoots = ownedPlanRoots(root);
 
-	// Build incoming link map for orphan detection
-	const incoming = new Map<string, Set<string>>();
-	for (const file of files) {
-		for (const link of file.links) {
-			if (!incoming.has(link)) incoming.set(link, new Set());
-			incoming.get(link)!.add(file.relPath);
-		}
-	}
+	const routed = routedFromMap(root, files);
+	// Entrypoints are exempt by exact path, not by basename: a domain folder's
+	// summary.md is ordinary content that the map must route, while an owned
+	// sublode's summary.md is its own lode's entrypoint and is injected by
+	// `lode startup`. Matching on basename alone exempts every domain summary and
+	// lets a whole folder go unreachable without a warning.
+	const relBase = path.resolve(path.dirname(root));
+	const entrypoints = new Set(
+		ownedLodeRoots(root).flatMap(dir =>
+			STARTUP_FILES.map(name => path.relative(relBase, path.join(dir, name))),
+		),
+	);
 
 	for (const file of files) {
 		const rel = file.relPath;
@@ -1094,7 +1179,7 @@ function cmdCheck(root: string, _args: string[]): void {
 		const isPlan = isPlanFile(file, planRoots);
 
 		// Missing frontmatter
-		if (!fm.type && !fm.tags && !fm.keywords && !fm.summary && !fm.sublodes && !fm.sources && !fm.status) {
+		if (!fm.type && !fm.tags && !fm.keywords && !fm.summary && !fm.sublodes && !fm.sources && !fm.status && !fm.lineBudget) {
 			issues.push({ file: rel, issue: "no frontmatter", severity: "warn" });
 		}
 		// Missing type
@@ -1140,22 +1225,36 @@ function cmdCheck(root: string, _args: string[]): void {
 			}
 			seenSources.add(normalized);
 		}
-		// Over 250 lines
-		if (file.lines > 250) {
+		// Over 250 lines. `line-budget: exempt` opts out: the limit budgets a file a
+		// reader opens on purpose and decomposes when it grows, which does not
+		// describe an append-only record whose whole role is length.
+		if (fm.lineBudget !== undefined && fm.lineBudget !== "exempt") {
+			issues.push({
+				file: rel,
+				issue: `unknown line-budget '${fm.lineBudget}' (expected: exempt)`,
+				severity: "warn",
+			});
+		}
+		if (file.lines > 250 && fm.lineBudget !== "exempt") {
 			issues.push({ file: rel, issue: `${file.lines} lines (over 250)`, severity: "warn" });
 		}
-		// Broken links
+		// Broken links. The map and plans deliberately route outward to product
+		// artifacts, which are not Lode files, so membership in the lode is not the
+		// test — a link is broken only when nothing exists at the path. A typo
+		// inside `lode/` still fails, because that path does not exist either.
 		for (const link of file.links) {
-			if (!allPaths.has(link)) {
-				issues.push({ file: rel, issue: `broken link → ${link}`, severity: "error" });
-			}
+			if (allPaths.has(link)) continue;
+			if (fs.existsSync(path.resolve(relBase, link))) continue;
+			issues.push({ file: rel, issue: `broken link → ${link}`, severity: "error" });
 		}
-		// Orphan (no incoming links, not an entrypoint or sublode summary)
-		const basename = path.basename(rel);
-		const isEntrypoint = STARTUP_FILES.includes(basename) && rel.startsWith("lode/");
-		const isSublodeSummary = basename === "summary.md" && rel.includes("/lode/") && !rel.startsWith("lode/");
-		if (!isEntrypoint && !isSublodeSummary && (!incoming.has(rel) || incoming.get(rel)!.size === 0)) {
-			issues.push({ file: rel, issue: "orphan — no incoming links", severity: "info" });
+		// Unrouted: no path from the map reaches it, directly or through an area
+		// summary (entrypoints and transient plans are exempt)
+		if (!entrypoints.has(rel) && !isPlan && !routed.has(rel)) {
+			issues.push({
+				file: rel,
+				issue: "unrouted — no path from lode-map.md reaches it",
+				severity: "warn",
+			});
 		}
 	}
 
