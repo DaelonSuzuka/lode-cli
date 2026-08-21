@@ -64,6 +64,7 @@ interface LodeFile {
 	lines: number;
 	terms: TermEntry[];
 	links: string[];       // resolved relative paths this file links to
+	backlinks: string[];   // files that link to this file
 }
 
 interface TermEntry {
@@ -188,18 +189,43 @@ function parseTerms(body: string): TermEntry[] {
 	return terms;
 }
 
+/**
+ * Blank code regions (fenced blocks and inline code) so link extraction never
+ * counts a reference inside a code fence or inline code as a real link. Line
+ * numbers are preserved by blanking, not deleting.
+ */
+function stripCode(text: string): string {
+	const lines = text.split(/\r?\n/);
+	const out: string[] = [];
+	let fence: string | null = null;
+	for (const line of lines) {
+		const fenceMatch = line.match(/^\s*(```+|~~~+)/);
+		if (fenceMatch) {
+			out.push("");
+			fence = fence === null ? fenceMatch[1]![0]!.repeat(3) : null;
+			continue;
+		}
+		if (fence !== null) {
+			out.push("");
+			continue;
+		}
+		out.push(line.replace(/`[^`\n]*`/g, (m) => " ".repeat(m.length)));
+	}
+	return out.join("\n");
+}
+
 // ─── link extraction ────────────────────────────────────────────────────
 
 const MD_LINK = /\[([^\]]*)\]\(([^)]+)\)/g;
 const WIKI_LINK = /\[\[([^\]]+)\]\]/g;
-
 function extractLinks(body: string, fromPath: string, root: string): string[] {
+	const stripped = stripCode(body);
 	const links: string[] = [];
 	const dir = path.dirname(fromPath);
 
 	let m: RegExpExecArray | null;
 	MD_LINK.lastIndex = 0;
-	while ((m = MD_LINK.exec(body)) !== null) {
+	while ((m = MD_LINK.exec(stripped)) !== null) {
 		const target = m[2];
 		if (target.startsWith("http") || target.startsWith("#") || target.startsWith("mailto:")) continue;
 		const resolved = normalizePath(path.join(dir, target), root);
@@ -207,7 +233,7 @@ function extractLinks(body: string, fromPath: string, root: string): string[] {
 	}
 
 	WIKI_LINK.lastIndex = 0;
-	while ((m = WIKI_LINK.exec(body)) !== null) {
+	while ((m = WIKI_LINK.exec(stripped)) !== null) {
 		const target = m[1].split("|")[0].split("#")[0].trim();
 		// wiki links resolve against root by filename
 		const found = findByFilename(target, root);
@@ -223,7 +249,7 @@ function normalizePath(p: string, root: string): string | null {
 	// must be within root
 	const abs = path.resolve(root, normalized);
 	if (!abs.startsWith(path.resolve(root))) return null;
-	return path.relative(root, abs);
+	return path.relative(root, abs).split(path.sep).join("/");
 }
 
 // Cache for wiki-link filename resolution
@@ -238,6 +264,29 @@ function findByFilename(filename: string, root: string): string | null {
 		}
 	}
 	return fileIndex.get(filename.toLowerCase().replace(/\.md$/, "")) ?? null;
+}
+
+/**
+ * Case-exact existence check. Node's existsSync is only as exact as the
+ * underlying filesystem (case-insensitive on Windows/macOS), so a link that
+ * would 404 on a case-sensitive checkout can look resolvable here. Walking
+ * each component through readdir gives the portable answer.
+ */
+function existsCaseExact(absPath: string): boolean {
+	const { root: vol } = path.parse(absPath);
+	if (!vol) return false;
+	let cur = vol;
+	for (const part of absPath.slice(vol.length).split(/[\\/]+/).filter(Boolean)) {
+		let entries: string[];
+		try {
+			entries = fs.readdirSync(cur);
+		} catch {
+			return false;
+		}
+		if (!entries.includes(part)) return false;
+		cur = path.join(cur, part);
+	}
+	return true;
 }
 
 // ─── file walking ───────────────────────────────────────────────────────
@@ -256,7 +305,7 @@ function* walkMd(dir: string, base = dir): Generator<string> {
 			if (entry.name === "tmp" || entry.name === ".git" || entry.name === "node_modules") continue;
 			yield* walkMd(full, base);
 		} else if (entry.name.endsWith(".md")) {
-			yield path.relative(base, full);
+		yield path.relative(base, full).split(path.sep).join("/");
 		}
 	}
 }
@@ -304,7 +353,7 @@ function readSublodeConfig(lodeRoot: string): SublodeConfig {
 		}
 
 		const full = path.resolve(projectRoot, raw);
-		const rel = path.relative(projectRoot, full);
+		const rel = path.relative(projectRoot, full).split(path.sep).join("/");
 		if (!isInsidePath(projectRoot, full)) {
 			issues.push(`invalid sublode '${raw}': path escapes the project root`);
 			continue;
@@ -392,11 +441,11 @@ function loadFile(relPath: string, root: string): LodeFile {
 		lines: content.split("\n").length,
 		terms,
 		links,
+		backlinks: [],
 	};
 }
 
 function loadAll(root: string, include?: (relPath: string) => boolean): LodeFile[] {
-	fileIndex = null; // reset wiki-link cache
 	const projectRoot = path.dirname(root);
 	const files: LodeFile[] = [];
 
@@ -423,6 +472,14 @@ function loadAll(root: string, include?: (relPath: string) => boolean): LodeFile
 	fileIndex = new Map();
 	for (const f of files) {
 		fileIndex.set(path.basename(f.relPath, ".md").toLowerCase(), f.relPath);
+	}
+	// compute backlinks by inverting the link graph
+	const byPath = new Map(files.map(f => [f.relPath, f]));
+	for (const f of files) {
+		for (const link of f.links) {
+			const target = byPath.get(link);
+			if (target) target.backlinks.push(f.relPath);
+		}
 	}
 
 	return files;
@@ -653,8 +710,8 @@ function cmdSearch(root: string, args: string[]): void {
 			console.error("lode search: --under must be a non-empty project-relative path");
 			process.exit(2);
 		}
-		under = path.normalize(raw);
-		if (under === ".." || under.startsWith(`..${path.sep}`)) {
+		under = path.normalize(raw).split(path.sep).join("/");
+		if (under === ".." || under.startsWith("../")) {
 			console.error("lode search: --under may not escape the project root");
 			process.exit(2);
 		}
@@ -679,7 +736,7 @@ function cmdSearch(root: string, args: string[]): void {
 	}
 	const terms = query.split(/\s+/).filter(Boolean);
 	const include = under
-		? (relPath: string) => relPath === under || relPath.startsWith(`${under}${path.sep}`)
+		? (relPath: string) => relPath === under || relPath.startsWith(`${under}/`)
 		: undefined;
 	const files = loadAll(root, include);
 
@@ -802,7 +859,7 @@ function cmdWalk(root: string, args: string[]): void {
 	const relBase = path.dirname(root);
 	const insideLode = path.resolve(root, target);
 	const absTarget = fs.existsSync(insideLode) ? insideLode : path.resolve(relBase, target);
-	const rel = path.relative(relBase, absTarget);
+	const rel = path.relative(relBase, absTarget).split(path.sep).join("/");
 	let isDir = false;
 	try {
 		isDir = fs.statSync(absTarget).isDirectory();
@@ -811,7 +868,7 @@ function cmdWalk(root: string, args: string[]): void {
 		process.exit(1);
 	}
 	const startFiles = isDir
-		? all.filter(f => f.relPath.startsWith(rel + "/") || f.relPath.startsWith(rel + path.sep))
+		? all.filter(f => f.relPath.startsWith(rel + "/"))
 		: [byPath.get(rel)].filter(Boolean) as LodeFile[];
 
 	if (startFiles.length === 0) {
@@ -825,19 +882,27 @@ function cmdWalk(root: string, args: string[]): void {
 		console.log(`  summary: ${summary}`);
 		if (file.links.length === 0) {
 			console.log("  links: (none)");
-			continue;
+		} else {
+			console.log("  links:");
+			const seen = new Set<string>();
+			for (const link of file.links) {
+				if (seen.has(link)) continue;
+				seen.add(link);
+				const linked = byPath.get(link);
+				if (linked) {
+					const lsum = linked.frontmatter.summary ?? "(no summary)";
+					console.log(`    → ${link} — ${lsum}`);
+				} else {
+					console.log(`    → ${link} — (BROKEN)`);
+				}
+			}
 		}
-		console.log("  links:");
-		const seen = new Set<string>();
-		for (const link of file.links) {
-			if (seen.has(link)) continue;
-			seen.add(link);
-			const linked = byPath.get(link);
-			if (linked) {
-				const lsum = linked.frontmatter.summary ?? "(no summary)";
-				console.log(`    → ${link} — ${lsum}`);
-			} else {
-				console.log(`    → ${link} — (BROKEN)`);
+		if (file.backlinks.length > 0) {
+			console.log("  backlinks:");
+			for (const bl of file.backlinks) {
+				const linked = byPath.get(bl);
+				const lsum = linked?.frontmatter.summary ?? "(no summary)";
+				console.log(`    ← ${bl} — ${lsum}`);
 			}
 		}
 	}
@@ -1094,7 +1159,7 @@ function routedFromMap(root: string, files: LodeFile[]): Set<string> {
 	const byPath = new Map(files.map(file => [file.relPath, file]));
 	const relBase = path.resolve(path.dirname(root));
 	const queue = ownedLodeRoots(root).flatMap(dir =>
-		["lode-map.md", "summary.md"].map(name => path.relative(relBase, path.join(dir, name))),
+		["lode-map.md", "summary.md"].map(name => path.relative(relBase, path.join(dir, name)).split(path.sep).join("/")),
 	);
 	const routed = new Set<string>();
 	while (queue.length > 0) {
@@ -1148,12 +1213,92 @@ function cmdPlans(root: string, args: string[]): void {
 	if (plans.length === 0) console.log("No plans match.");
 }
 
+// ─── staleness and coverage checks ──────────────────────────────────────
+
+/** Days before an active plan with no recorded blocker is flagged as stale. */
+const ACTIVE_PLAN_STALE_DAYS = 30;
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+/**
+ * Flag active plans whose last file write (fs mtime) exceeds a threshold. A
+ * stale active plan is drift — either the work stalled without recording why, or
+ * the plan was abandoned without being moved to parked/done. Warn (never error):
+ * the remedy is a judgment call (reconfirm active, pause, or advance).
+ */
+function checkActivePlanStaleness(files: LodeFile[], planRoots: string[]): Array<{ file: string; issue: string; severity: string }> {
+	const now = Date.now();
+	const cutoff = now - ACTIVE_PLAN_STALE_DAYS * MS_PER_DAY;
+	const issues: Array<{ file: string; issue: string; severity: string }> = [];
+	for (const file of files) {
+		if (!isPlanFile(file, planRoots)) continue;
+		if (file.frontmatter.status !== "active") continue;
+		let mtime: number;
+		try {
+			mtime = fs.statSync(file.absPath).mtimeMs;
+		} catch {
+			continue;
+		}
+		if (mtime < cutoff) {
+			const days = Math.floor((now - mtime) / MS_PER_DAY);
+			issues.push({
+				file: file.relPath,
+				issue: `active plan untouched for ${days} days (over ${ACTIVE_PLAN_STALE_DAYS}) — reconfirm it's active, pause it, or advance it`,
+				severity: "warn",
+			});
+		}
+	}
+	return issues;
+}
+
+/**
+ * Check on-disk top-level lode directories against mentions in lode-map.md. A
+ * directory whose name appears nowhere in the map body is drift: either the map
+ * is missing an area, or the directory should be named in the map's
+ * "Deliberately unmapped" note. Warn (never error): an unmentioned directory
+ * blocks no correct operation. `tmp/` is always exempt (session scraps, never
+ * routed). `plans/` is exempt (plans have their own view via `lode plans`).
+ */
+function checkMapCoverage(root: string, files: LodeFile[]): Array<{ file: string; issue: string; severity: string }> {
+	const mapFile = files.find(f => path.basename(f.relPath) === "lode-map.md");
+	if (!mapFile) return [];
+	const mapBody = mapFile.body.toLowerCase();
+	const lodeRoot = path.resolve(root);
+	const issues: Array<{ file: string; issue: string; severity: string }> = [];
+	const exempt = new Set(["tmp", "plans"]);
+	let entries: fs.Dirent[];
+	try {
+		entries = fs.readdirSync(lodeRoot, { withFileTypes: true });
+	} catch {
+		return [];
+	}
+	for (const entry of entries) {
+		if (!entry.isDirectory()) continue;
+		if (exempt.has(entry.name)) continue;
+		if (entry.name.startsWith(".")) continue;
+		const name = entry.name.toLowerCase();
+		let mentioned: boolean;
+		if (name.length <= 2) {
+			mentioned = new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\\\]/g, "\\\\$&")}\\b`).test(mapBody);
+		} else {
+			mentioned = mapBody.includes(name);
+		}
+		if (!mentioned) {
+			issues.push({
+				file: "lode-map.md",
+				issue: `${entry.name}/ has no mention in lode-map.md — add it to the routing or to a "deliberately unmapped" note`,
+				severity: "warn",
+			});
+		}
+	}
+	return issues;
+}
+
 function cmdCheck(root: string, _args: string[]): void {
 	const files = loadAll(root);
 	const allPaths = new Set(files.map(f => f.relPath));
 	const issues: Array<{ file: string; issue: string; severity: string }> = [];
 
-	const rootSummary = path.relative(path.dirname(root), path.join(root, "summary.md"));
+	const rootSummary = path.relative(path.dirname(root), path.join(root, "summary.md")).split(path.sep).join("/");
 	for (const issue of readSublodeConfig(root).issues) {
 		issues.push({ file: rootSummary, issue, severity: "error" });
 	}
@@ -1169,7 +1314,7 @@ function cmdCheck(root: string, _args: string[]): void {
 	const relBase = path.resolve(path.dirname(root));
 	const entrypoints = new Set(
 		ownedLodeRoots(root).flatMap(dir =>
-			STARTUP_FILES.map(name => path.relative(relBase, path.join(dir, name))),
+		STARTUP_FILES.map(name => path.relative(relBase, path.join(dir, name)).split(path.sep).join("/")),
 		),
 	);
 
@@ -1244,8 +1389,13 @@ function cmdCheck(root: string, _args: string[]): void {
 		// inside `lode/` still fails, because that path does not exist either.
 		for (const link of file.links) {
 			if (allPaths.has(link)) continue;
-			if (fs.existsSync(path.resolve(relBase, link))) continue;
-			issues.push({ file: rel, issue: `broken link → ${link}`, severity: "error" });
+			const abs = path.resolve(relBase, link);
+			if (existsCaseExact(abs)) continue;
+			if (fs.existsSync(abs)) {
+				issues.push({ file: rel, issue: `broken link → ${link} (case mismatch — resolves only case-insensitively, breaks on case-sensitive checkouts)`, severity: "warn" });
+			} else {
+				issues.push({ file: rel, issue: `broken link → ${link}`, severity: "error" });
+			}
 		}
 		// Unrouted: no path from the map reaches it, directly or through an area
 		// summary (entrypoints and transient plans are exempt)
@@ -1273,6 +1423,9 @@ function cmdCheck(root: string, _args: string[]): void {
 		}
 	}
 
+	// Active plan staleness and map coverage
+	issues.push(...checkActivePlanStaleness(files, planRoots));
+	issues.push(...checkMapCoverage(root, files));
 	if (issues.length === 0) {
 		console.log("All clear.");
 		return;

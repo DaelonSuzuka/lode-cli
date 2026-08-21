@@ -105,7 +105,7 @@ Define terminology inline in any file:
 lode startup              dump entrypoint files for session start
 lode search <query>       metadata search; --content enables bounded full text
 lode list [--type=T] [--tag=T]   list files, optionally filtered
-lode walk <file-or-dir>   resolve internal links, show linked summaries
+lode walk <file-or-dir>   resolve internal links, show linked summaries and backlinks
 lode map                  print directory index from frontmatter
 lode terms                aggregate term blocks into glossary
 lode tags                 tag counts
@@ -226,12 +226,15 @@ The tool finds the lode root in this order:
 - Missing `type` (must be `domain` or `external`)
 - Missing `summary` or `keywords`
 - Broken internal links (relative path points at nothing)
+- Case-mismatch links (resolve only case-insensitively — breaks on case-sensitive checkouts)
 - Term conflicts (same term name, different definition)
 - Files over 250 lines
 - Orphan files (no incoming links, not an entrypoint file)
 - Invalid or unsafe sublode ownership declarations
 - Invalid, escaping, or duplicate `sources` declarations
 - Missing or unknown lifecycle status on plan files
+- Active plans untouched past 30 days (staleness — reconfirm, pause, or advance)
+- Top-level lode directories not mentioned in `lode-map.md` (coverage drift)
 
 ## Plans with lifecycle
 
