@@ -117,7 +117,6 @@ lode mail send <project> <subject>   send inter-project mail (body on stdin)
 lode mail read                        show and mark unread mail
 lode mail list                        all mail for current project
 lode mail unread                      print count of unread mail
-```
 
 ### `--path=DIR`
 
@@ -144,6 +143,68 @@ same bounded results as a stable machine-readable object.
 Machine callers should pass exact query text as `--query=TEXT`; it cannot be
 mistaken for a search flag. Positional query text remains the concise human
 interface, and mixing positional text with `--query` is rejected.
+
+## Session startup
+
+`lode startup` dumps the entrypoint files a session needs before any work
+begins. The omp startup hook calls it unconditionally at session start, so it
+exits silently with zero when no lode is found rather than printing an error.
+A lode is detected when at least one of `summary.md`, `lode-map.md`, or
+`terminology.md` exists in the root; if none do, the command produces no
+output and returns success.
+
+### Output order
+
+1. **Root entrypoint files** — loaded in a fixed order: `summary.md`,
+   `terminology.md`, `lode-map.md`, then `tmp/active.md` (if present). Each is
+   emitted as `=== <path> ===` followed by the file body. Missing files are
+   skipped silently.
+2. **Sublode summaries** — every sublode declared in root `summary.md`
+   frontmatter contributes its `summary.md`, same `=== <sub>/summary.md ===`
+   format. A sublode without `summary.md` is skipped here; `lode check` flags
+   that as a declaration error.
+3. **Map pointer** — a one-line summary of total file count with pointers to
+   `lode map` and `lode search`. The full directory inventory is not injected:
+   it would duplicate the curated `lode-map.md` in flat form and the two would
+   drift. The file count lets a session judge whether the inventory is worth a
+   call at this lode's size.
+4. **Tool help** — the `lode-cli` command reference so the session knows the
+   mechanical acceleration available without reading this README.
+
+If no entrypoint files were found at all (all four root files missing and no
+sublode summaries loaded), the command prints an error to stderr and exits 1.
+
+### Byte budget
+
+Total output is capped at 40,000 bytes to keep session-start context bounded.
+The budget is consumed in output order: root entrypoints first, then sublode
+summaries. A file that would exceed the remaining budget is skipped and listed
+at the bottom under:
+
+```text
+=== over the 40000-char budget, NOT loaded — read these ===
+- summary.md (41203 chars)
+- src/peripherals/lode/summary.md (8910 chars)
+```
+
+The omission list gives the exact path and byte count so a session can decide
+which files to fetch on demand and how large they are. Files are all-or-nothing
+per file — no partial truncation.
+
+### omp integration
+
+The `install.sh hook` command symlinks `hooks/load-lode.ts` into
+`~/.omp/agent/hooks/pre/`. This hook replaces omp's built-in lode loading with
+`lode startup`, which adds sublode summaries and tool help to the session-start
+context. The hook falls back silently if `lode` is not on PATH.
+
+### Usage
+
+```sh
+lode startup                      # auto-detect lode root from cwd
+lode startup --path=lode          # explicit root
+```
+
 
 ## Sublodes
 
